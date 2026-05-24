@@ -184,6 +184,7 @@ class FaceMeshRunner:
 # Eye landmark indices for MediaPipe Face Mesh
 _LEFT_EYE = (33, 160, 158, 133, 153, 144)
 _RIGHT_EYE = (362, 385, 387, 263, 373, 380)
+_MOUTH = (13, 14, 78, 308)
 
 
 def _eye_aspect_ratio(landmarks: List[dict], idxs) -> Optional[float]:
@@ -205,6 +206,24 @@ def _eye_aspect_ratio(landmarks: List[dict], idxs) -> Optional[float]:
     return (v1 + v2) / (2.0 * h)
 
 
+def _mouth_aspect_ratio(landmarks: List[dict]) -> Optional[float]:
+    try:
+        p_top, p_bot, p_left, p_right = [landmarks[i] for i in _MOUTH]
+    except Exception:
+        return None
+
+    def _dist(a, b) -> float:
+        dx = float(a['x']) - float(b['x'])
+        dy = float(a['y']) - float(b['y'])
+        return float((dx * dx + dy * dy) ** 0.5)
+
+    v = _dist(p_top, p_bot)
+    h = _dist(p_left, p_right)
+    if h <= 1e-6:
+        return None
+    return v / h
+
+
 class EyeMetricsTracker:
     """Compute eye openness, PERCLOS, and blink rate from landmarks."""
 
@@ -215,12 +234,16 @@ class EyeMetricsTracker:
         blink_min_sec: float = 0.05,
         blink_max_sec: float = 0.60,
         blink_window_sec: float = 60.0,
+        yawn_open_thresh: float = 0.30,
+        yawn_open_max: float = 0.55,
     ) -> None:
         self.perclos_window_sec = float(perclos_window_sec)
         self.eye_closed_thresh = float(eye_closed_thresh)
         self.blink_min_sec = float(blink_min_sec)
         self.blink_max_sec = float(blink_max_sec)
         self.blink_window_sec = float(blink_window_sec)
+        self.yawn_open_thresh = float(yawn_open_thresh)
+        self.yawn_open_max = float(yawn_open_max)
         self._closed_samples = deque()
         self._blink_times = deque()
         self._is_closed = False
@@ -230,6 +253,8 @@ class EyeMetricsTracker:
             'eye_closed': None,
             'perclos': None,
             'blink_rate': None,
+            'mouth_open': None,
+            'yawn_prob': None,
         }
 
     def update(self, landmarks: Optional[List[dict]], ts: Optional[float] = None) -> dict:
@@ -250,6 +275,13 @@ class EyeMetricsTracker:
             ear = float((ear_l + ear_r) * 0.5)
 
         closed = ear < self.eye_closed_thresh
+
+        mar = _mouth_aspect_ratio(landmarks)
+        if mar is None:
+            yawn_prob = None
+        else:
+            denom = max(1e-6, self.yawn_open_max - self.yawn_open_thresh)
+            yawn_prob = float(np.clip((mar - self.yawn_open_thresh) / denom, 0.0, 1.0))
 
         # PERCLOS (fraction of closed-eye samples in window)
         self._closed_samples.append((ts, closed))
@@ -284,5 +316,7 @@ class EyeMetricsTracker:
             'eye_closed': closed,
             'perclos': perclos,
             'blink_rate': blink_rate,
+            'mouth_open': mar,
+            'yawn_prob': yawn_prob,
         }
         return self._last_metrics

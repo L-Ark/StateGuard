@@ -35,6 +35,10 @@ class FatigueCalibrator:
     qualities: list[float] = field(default_factory=list)
     valence_samples: list[float] = field(default_factory=list)
     arousal_samples: list[float] = field(default_factory=list)
+    perclos_samples: list[float] = field(default_factory=list)
+    blink_rate_samples: list[float] = field(default_factory=list)
+    yawn_samples: list[float] = field(default_factory=list)
+    lmk_fatigue_samples: list[float] = field(default_factory=list)
     finished: bool = False
     baseline: Optional[float] = None
     spread: Optional[float] = None
@@ -42,6 +46,14 @@ class FatigueCalibrator:
     valence_spread: Optional[float] = None
     arousal_baseline: Optional[float] = None
     arousal_spread: Optional[float] = None
+    perclos_baseline: Optional[float] = None
+    perclos_spread: Optional[float] = None
+    blink_baseline: Optional[float] = None
+    blink_spread: Optional[float] = None
+    yawn_baseline: Optional[float] = None
+    yawn_spread: Optional[float] = None
+    lmk_fatigue_baseline: Optional[float] = None
+    lmk_fatigue_spread: Optional[float] = None
 
     def elapsed(self) -> float:
         return time.time() - self.started_at
@@ -59,22 +71,32 @@ class FatigueCalibrator:
         fatigue: Optional[float],
         valence: Optional[float],
         arousal: Optional[float],
+        perclos: Optional[float],
+        blink_rate: Optional[float],
+        yawn_prob: Optional[float],
+        lmk_fatigue: Optional[float],
         quality: float,
-        force: bool = False,
     ) -> None:
         if self.finished:
             return
-        if fatigue is None or np.isnan(fatigue):
-            return
         now = time.time()
-        if not force and (now - self.last_sample_at) < self.sample_every_sec:
+        if (now - self.last_sample_at) < self.sample_every_sec:
             return
-        self.samples.append(float(fatigue))
+        if fatigue is not None and np.isfinite(fatigue):
+            self.samples.append(float(fatigue))
         self.qualities.append(float(quality) if np.isfinite(quality) else float('nan'))
         if valence is not None and np.isfinite(valence):
             self.valence_samples.append(float(valence))
         if arousal is not None and np.isfinite(arousal):
             self.arousal_samples.append(float(arousal))
+        if perclos is not None and np.isfinite(perclos):
+            self.perclos_samples.append(float(perclos))
+        if blink_rate is not None and np.isfinite(blink_rate):
+            self.blink_rate_samples.append(float(blink_rate))
+        if yawn_prob is not None and np.isfinite(yawn_prob):
+            self.yawn_samples.append(float(yawn_prob))
+        if lmk_fatigue is not None and np.isfinite(lmk_fatigue):
+            self.lmk_fatigue_samples.append(float(lmk_fatigue))
         self.last_sample_at = now
 
     def maybe_finish(self) -> bool:
@@ -104,6 +126,34 @@ class FatigueCalibrator:
             else:
                 self.arousal_baseline = 0.0
                 self.arousal_spread = 0.6
+            if self.perclos_samples:
+                arr_p = np.asarray(self.perclos_samples, dtype=np.float32)
+                self.perclos_baseline = float(np.median(arr_p))
+                self.perclos_spread = float(np.std(arr_p) + 1e-6)
+            else:
+                self.perclos_baseline = 0.2
+                self.perclos_spread = 0.1
+            if self.blink_rate_samples:
+                arr_b = np.asarray(self.blink_rate_samples, dtype=np.float32)
+                self.blink_baseline = float(np.median(arr_b))
+                self.blink_spread = float(np.std(arr_b) + 1e-6)
+            else:
+                self.blink_baseline = 15.0
+                self.blink_spread = 5.0
+            if self.yawn_samples:
+                arr_y = np.asarray(self.yawn_samples, dtype=np.float32)
+                self.yawn_baseline = float(np.median(arr_y))
+                self.yawn_spread = float(np.std(arr_y) + 1e-6)
+            else:
+                self.yawn_baseline = 0.0
+                self.yawn_spread = 0.2
+            if self.lmk_fatigue_samples:
+                arr_l = np.asarray(self.lmk_fatigue_samples, dtype=np.float32)
+                self.lmk_fatigue_baseline = float(np.median(arr_l))
+                self.lmk_fatigue_spread = float(np.std(arr_l) + 1e-6)
+            else:
+                self.lmk_fatigue_baseline = 0.3
+                self.lmk_fatigue_spread = 0.2
             self.finished = True
         return self.finished
 
@@ -124,6 +174,20 @@ class FatigueCalibrator:
             return float(raw_value)
         scale = max(0.18, (self.spread or 0.0) * 3.0)
         adjusted = 0.5 + (float(raw_value) - self.baseline) / scale
+        return float(np.clip(adjusted, 0.0, 1.0))
+
+    def calibrated_scalar_value(
+        self,
+        raw_value: Optional[float],
+        baseline: Optional[float],
+        spread: Optional[float],
+    ) -> Optional[float]:
+        if raw_value is None or np.isnan(raw_value):
+            return None
+        if not self.finished or baseline is None:
+            return float(raw_value)
+        scale = max(0.18, (spread or 0.0) * 3.0)
+        adjusted = 0.5 + (float(raw_value) - baseline) / scale
         return float(np.clip(adjusted, 0.0, 1.0))
 
     def calibrated_va_value(
@@ -182,6 +246,8 @@ def main():
     ap.add_argument('--eye-closed-thresh', type=float, default=0.20, help='EAR threshold below which eye is closed')
     ap.add_argument('--blink-min-sec', type=float, default=0.05, help='Minimum blink duration (s)')
     ap.add_argument('--blink-max-sec', type=float, default=0.60, help='Maximum blink duration (s)')
+    ap.add_argument('--yawn-open-thresh', type=float, default=0.30, help='Mouth open ratio threshold for yawning')
+    ap.add_argument('--yawn-open-max', type=float, default=0.55, help='Mouth open ratio mapped to full yawning')
     args = ap.parse_args()
 
     w = Path(args.weights)
@@ -230,6 +296,8 @@ def main():
         blink_min_sec=args.blink_min_sec,
         blink_max_sec=args.blink_max_sec,
         blink_window_sec=args.perclos_window_sec,
+        yawn_open_thresh=args.yawn_open_thresh,
+        yawn_open_max=args.yawn_open_max,
     ))
 
     # Initialize mediapipe FaceMesh for real-time landmarks (optional)
@@ -271,15 +339,29 @@ def main():
             break
         rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         r = pipe.step(rgb)
-        # Strict sync: only collect calibration samples when a VA window closes
-        if r.va_updated:
-            calib.add_sample(r.fatigue, r.valence, r.arousal, r.quality, force=True)
+        # Calibration: sample at a fixed cadence during the initial window only
+        calib.add_sample(
+            r.fatigue,
+            r.valence,
+            r.arousal,
+            r.perclos,
+            r.blink_rate,
+            r.yawn_prob,
+            r.fatigue_landmark,
+            r.quality,
+        )
         calib.maybe_finish()
         if r.va_updated:
             ts = datetime.now().astimezone().isoformat(timespec='milliseconds')
             fatigue_calib = calib.calibrated_value(r.fatigue)
             valence_calib = calib.calibrated_va_value(r.valence, calib.valence_baseline, calib.valence_spread)
             arousal_calib = calib.calibrated_va_value(r.arousal, calib.arousal_baseline, calib.arousal_spread)
+            perclos_calib = calib.calibrated_scalar_value(r.perclos, calib.perclos_baseline, calib.perclos_spread)
+            blink_calib = calib.calibrated_scalar_value(r.blink_rate, calib.blink_baseline, calib.blink_spread)
+            yawn_calib = calib.calibrated_scalar_value(r.yawn_prob, calib.yawn_baseline, calib.yawn_spread)
+            lmk_fatigue_calib = calib.calibrated_scalar_value(
+                r.fatigue_landmark, calib.lmk_fatigue_baseline, calib.lmk_fatigue_spread
+            )
             logf.write(
                 f'{ts}\tframe={int(cap.get(cv2.CAP_PROP_POS_FRAMES) or 0)}\tbvp={r.bvp:.6f}\t'
                 f'hr={r.hr:.3f}\trmssd={r.rmssd:.3f}\tsdnn={r.sdnn:.3f}\tquality={r.quality:.3f}\t'
@@ -291,8 +373,14 @@ def main():
                 f'arousal_raw={"" if r.arousal is None else f"{r.arousal:.3f}"}\t'
                 f'valence_calib={"" if valence_calib is None else f"{valence_calib:.3f}"}\t'
                 f'arousal_calib={"" if arousal_calib is None else f"{arousal_calib:.3f}"}\t'
-                f'perclos={"" if r.perclos is None else f"{r.perclos:.3f}"}\t'
-                f'blink_rate={"" if r.blink_rate is None else f"{r.blink_rate:.2f}"}\t'
+                f'perclos_raw={"" if r.perclos is None else f"{r.perclos:.3f}"}\t'
+                f'perclos_calib={"" if perclos_calib is None else f"{perclos_calib:.3f}"}\t'
+                f'blink_raw={"" if r.blink_rate is None else f"{r.blink_rate:.2f}"}\t'
+                f'blink_calib={"" if blink_calib is None else f"{blink_calib:.2f}"}\t'
+                f'yawn_raw={"" if r.yawn_prob is None else f"{r.yawn_prob:.2f}"}\t'
+                f'yawn_calib={"" if yawn_calib is None else f"{yawn_calib:.2f}"}\t'
+                f'lmk_fatigue_raw={"" if r.fatigue_landmark is None else f"{r.fatigue_landmark:.2f}"}\t'
+                f'lmk_fatigue_calib={"" if lmk_fatigue_calib is None else f"{lmk_fatigue_calib:.2f}"}\t'
                 f'va_calib_state={"ready" if calib.finished else "calibrating"}\n'
             )
             logf.flush()
@@ -345,31 +433,34 @@ def main():
         t(f'VA mode: {r.va_mode}', 68, (0, 220, 255) if r.va_mode == 'multimodal' else (255, 200, 0))
         perclos = '--' if r.perclos is None or np.isnan(r.perclos) else f'{r.perclos:.2f}'
         blink_rate = '--' if r.blink_rate is None or np.isnan(r.blink_rate) else f'{r.blink_rate:.1f}/min'
-        t(f'PERCLOS: {perclos}   Blink: {blink_rate}', 88, (180, 255, 180))
+        yawn = '--' if r.yawn_prob is None or np.isnan(r.yawn_prob) else f'{r.yawn_prob:.2f}'
+        lmk_fat = '--' if r.fatigue_landmark is None or np.isnan(r.fatigue_landmark) else f'{r.fatigue_landmark:.2f}'
+        t(f'PERCLOS: {perclos}   Blink: {blink_rate}   Yawn: {yawn}', 88, (180, 255, 180))
+        t(f'Landmark fatigue: {lmk_fat}', 108, (255, 220, 160))
         v = '--' if r.valence is None or np.isnan(r.valence) else f'{r.valence:+.2f}'
         a = '--' if r.arousal is None or np.isnan(r.arousal) else f'{r.arousal:+.2f}'
         if calib.finished:
             f_raw = '--' if r.fatigue is None or np.isnan(r.fatigue) else f'{r.fatigue:.2f}'
             f_cal = '--' if fatigue_calib is None or np.isnan(fatigue_calib) else f'{fatigue_calib:.2f}'
             f_color = (0, 255, 255) if fatigue_calib is None or np.isnan(fatigue_calib) or fatigue_calib < 0.5 else (0, 80, 255)
-            t(f'Fatigue (calib): {f_cal}   raw: {f_raw}', 112, f_color)
+            t(f'Fatigue (calib): {f_cal}   raw: {f_raw}', 132, f_color)
             if calib.baseline is not None:
-                t(f'Personal baseline: {calib.baseline:.2f}', 136, (180, 180, 180))
-            t(f'Calibration: {calib.confidence_text()}', 160, (255, 220, 120) if len(calib.samples) < calib.min_samples else (120, 255, 120))
+                t(f'Personal baseline: {calib.baseline:.2f}', 156, (180, 180, 180))
+            t(f'Calibration: {calib.confidence_text()}', 180, (255, 220, 120) if len(calib.samples) < calib.min_samples else (120, 255, 120))
             v_cal = '--' if valence_calib is None or np.isnan(valence_calib) else f'{valence_calib:+.2f}'
             a_cal = '--' if arousal_calib is None or np.isnan(arousal_calib) else f'{arousal_calib:+.2f}'
-            t(f'V: {v_cal}   A: {a_cal}', 184, (0, 255, 255))
-            t(f'Raw V/A: {v} / {a}', 208, (180, 180, 180))
+            t(f'V: {v_cal}   A: {a_cal}', 204, (0, 255, 255))
+            t(f'Raw V/A: {v} / {a}', 228, (180, 180, 180))
         else:
             remain = int(round(calib.remaining()))
             mm = remain // 60
             ss = remain % 60
             target_windows = max(calib.min_samples, int(round(calib.duration_sec / max(0.5, calib.sample_every_sec))))
-            t(f'Calibration in progress: {mm:02d}:{ss:02d} remaining', 112, (0, 200, 255))
-            t('Please stay relaxed and keep your face visible', 136, (0, 200, 255))
-            t(f'Collected samples: {len(calib.samples)}/{target_windows}', 160, (255, 255, 255))
-            t('VA will be calibrated after this phase', 184, (255, 255, 255))
-            t(f'Raw V: {v}   Raw A: {a}', 208, (0, 255, 255))
+            t(f'Calibration in progress: {mm:02d}:{ss:02d} remaining', 132, (0, 200, 255))
+            t('Please stay relaxed and keep your face visible', 156, (0, 200, 255))
+            t(f'Collected samples: {len(calib.samples)}/{target_windows}', 180, (255, 255, 255))
+            t('VA will be calibrated after this phase', 204, (255, 255, 255))
+            t(f'Raw V: {v}   Raw A: {a}', 228, (0, 255, 255))
 
         cv2.imshow('StateGuard', disp)
         if cv2.waitKey(1) & 0xFF == ord('q'):
