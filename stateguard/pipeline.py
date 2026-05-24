@@ -47,6 +47,7 @@ class FrameResult:
     blink_rate: Optional[float] = None
     mouth_open: Optional[float] = None
     yawn_prob: Optional[float] = None
+    yawn_rate: Optional[float] = None
     fatigue_landmark: Optional[float] = None
     va_updated: bool = False
 
@@ -86,6 +87,9 @@ class StateGuardConfig:
     blink_window_sec: float = 60.0
     yawn_open_thresh: float = 0.30
     yawn_open_max: float = 0.55
+    yawn_min_sec: float = 0.60
+    yawn_max_sec: float = 3.00
+    yawn_window_sec: float = 60.0
 
 
 class StateGuardPipeline:
@@ -123,6 +127,7 @@ class StateGuardPipeline:
         self._last_blink_rate = None
         self._last_mouth_open = None
         self._last_yawn_prob = None
+        self._last_yawn_rate = None
         self._last_fatigue_landmark = None
         if FaceMeshRunner is not None:
             try:
@@ -139,6 +144,9 @@ class StateGuardPipeline:
                 blink_window_sec=self.cfg.blink_window_sec,
                 yawn_open_thresh=self.cfg.yawn_open_thresh,
                 yawn_open_max=self.cfg.yawn_open_max,
+                yawn_min_sec=self.cfg.yawn_min_sec,
+                yawn_max_sec=self.cfg.yawn_max_sec,
+                yawn_window_sec=self.cfg.yawn_window_sec,
             )
         # Throttle HRV recompute (Welch+peaks is the per-frame hot path)
         self._hrv_every = max(1, int(round(cfg.fps)))  # ~1Hz
@@ -207,6 +215,7 @@ class StateGuardPipeline:
         self._last_blink_rate = None
         self._last_mouth_open = None
         self._last_yawn_prob = None
+        self._last_yawn_rate = None
         self._last_fatigue_landmark = None
         if FaceMeshRunner is not None:
             try:
@@ -223,6 +232,9 @@ class StateGuardPipeline:
                 blink_window_sec=self.cfg.blink_window_sec,
                 yawn_open_thresh=self.cfg.yawn_open_thresh,
                 yawn_open_max=self.cfg.yawn_open_max,
+                yawn_min_sec=self.cfg.yawn_min_sec,
+                yawn_max_sec=self.cfg.yawn_max_sec,
+                yawn_window_sec=self.cfg.yawn_window_sec,
             )
         self._decim_acc = 0.0
         self._hrv_counter = 0
@@ -345,6 +357,7 @@ class StateGuardPipeline:
                 blink_rate=self._last_blink_rate,
                 mouth_open=self._last_mouth_open,
                 yawn_prob=self._last_yawn_prob,
+                yawn_rate=self._last_yawn_rate,
                 fatigue_landmark=self._last_fatigue_landmark,
                 face_box=None,
                 va_updated=False,
@@ -366,6 +379,7 @@ class StateGuardPipeline:
                                blink_rate=self._last_blink_rate,
                                mouth_open=self._last_mouth_open,
                                yawn_prob=self._last_yawn_prob,
+                               yawn_rate=self._last_yawn_rate,
                                fatigue_landmark=self._last_fatigue_landmark,
                                va_updated=False)
 
@@ -390,8 +404,9 @@ class StateGuardPipeline:
             self._last_blink_rate = metrics.get('blink_rate')
             self._last_mouth_open = metrics.get('mouth_open')
             self._last_yawn_prob = metrics.get('yawn_prob')
+            self._last_yawn_rate = metrics.get('yawn_rate')
             self._last_fatigue_landmark = self._compute_landmark_fatigue(
-                self._last_perclos, self._last_blink_rate, self._last_yawn_prob
+                self._last_perclos, self._last_blink_rate, self._last_yawn_rate
             )
 
         # Collect keyframes for VA
@@ -421,6 +436,7 @@ class StateGuardPipeline:
             blink_rate=self._last_blink_rate,
             mouth_open=self._last_mouth_open,
             yawn_prob=self._last_yawn_prob,
+            yawn_rate=self._last_yawn_rate,
             fatigue_landmark=self._last_fatigue_landmark,
             va_updated=(new_va is not None),
         )
@@ -429,9 +445,9 @@ class StateGuardPipeline:
     def _compute_landmark_fatigue(
         perclos: Optional[float],
         blink_rate: Optional[float],
-        yawn_prob: Optional[float],
+        yawn_rate: Optional[float],
     ) -> Optional[float]:
-        if perclos is None and blink_rate is None and yawn_prob is None:
+        if perclos is None and blink_rate is None and yawn_rate is None:
             return None
         p = float(perclos) if perclos is not None else 0.0
         # Normalize blink rate: 10-30 blinks/min mapped to 0..1
@@ -439,6 +455,10 @@ class StateGuardPipeline:
             b = 0.0
         else:
             b = float(np.clip((blink_rate - 10.0) / 20.0, 0.0, 1.0))
-        y = float(yawn_prob) if yawn_prob is not None else 0.0
+        # Normalize yawn rate: 0-4 yawns/min mapped to 0..1
+        if yawn_rate is None:
+            y = 0.0
+        else:
+            y = float(np.clip(yawn_rate / 4.0, 0.0, 1.0))
         score = 0.6 * p + 0.25 * y + 0.15 * b
         return float(np.clip(score, 0.0, 1.0))

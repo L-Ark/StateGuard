@@ -37,7 +37,7 @@ class FatigueCalibrator:
     arousal_samples: list[float] = field(default_factory=list)
     perclos_samples: list[float] = field(default_factory=list)
     blink_rate_samples: list[float] = field(default_factory=list)
-    yawn_samples: list[float] = field(default_factory=list)
+    yawn_rate_samples: list[float] = field(default_factory=list)
     lmk_fatigue_samples: list[float] = field(default_factory=list)
     finished: bool = False
     baseline: Optional[float] = None
@@ -73,7 +73,7 @@ class FatigueCalibrator:
         arousal: Optional[float],
         perclos: Optional[float],
         blink_rate: Optional[float],
-        yawn_prob: Optional[float],
+        yawn_rate: Optional[float],
         lmk_fatigue: Optional[float],
         quality: float,
     ) -> None:
@@ -93,8 +93,8 @@ class FatigueCalibrator:
             self.perclos_samples.append(float(perclos))
         if blink_rate is not None and np.isfinite(blink_rate):
             self.blink_rate_samples.append(float(blink_rate))
-        if yawn_prob is not None and np.isfinite(yawn_prob):
-            self.yawn_samples.append(float(yawn_prob))
+        if yawn_rate is not None and np.isfinite(yawn_rate):
+            self.yawn_rate_samples.append(float(yawn_rate))
         if lmk_fatigue is not None and np.isfinite(lmk_fatigue):
             self.lmk_fatigue_samples.append(float(lmk_fatigue))
         self.last_sample_at = now
@@ -140,13 +140,13 @@ class FatigueCalibrator:
             else:
                 self.blink_baseline = 15.0
                 self.blink_spread = 5.0
-            if self.yawn_samples:
-                arr_y = np.asarray(self.yawn_samples, dtype=np.float32)
+            if self.yawn_rate_samples:
+                arr_y = np.asarray(self.yawn_rate_samples, dtype=np.float32)
                 self.yawn_baseline = float(np.median(arr_y))
                 self.yawn_spread = float(np.std(arr_y) + 1e-6)
             else:
-                self.yawn_baseline = 0.0
-                self.yawn_spread = 0.2
+                self.yawn_baseline = 0.5
+                self.yawn_spread = 0.5
             if self.lmk_fatigue_samples:
                 arr_l = np.asarray(self.lmk_fatigue_samples, dtype=np.float32)
                 self.lmk_fatigue_baseline = float(np.median(arr_l))
@@ -248,6 +248,9 @@ def main():
     ap.add_argument('--blink-max-sec', type=float, default=0.60, help='Maximum blink duration (s)')
     ap.add_argument('--yawn-open-thresh', type=float, default=0.30, help='Mouth open ratio threshold for yawning')
     ap.add_argument('--yawn-open-max', type=float, default=0.55, help='Mouth open ratio mapped to full yawning')
+    ap.add_argument('--yawn-min-sec', type=float, default=0.60, help='Minimum yawn duration (s)')
+    ap.add_argument('--yawn-max-sec', type=float, default=3.00, help='Maximum yawn duration (s)')
+    ap.add_argument('--yawn-window-sec', type=float, default=60.0, help='Window (s) for yawn frequency')
     args = ap.parse_args()
 
     w = Path(args.weights)
@@ -298,6 +301,9 @@ def main():
         blink_window_sec=args.perclos_window_sec,
         yawn_open_thresh=args.yawn_open_thresh,
         yawn_open_max=args.yawn_open_max,
+        yawn_min_sec=args.yawn_min_sec,
+        yawn_max_sec=args.yawn_max_sec,
+        yawn_window_sec=args.yawn_window_sec,
     ))
 
     # Initialize mediapipe FaceMesh for real-time landmarks (optional)
@@ -346,7 +352,7 @@ def main():
             r.arousal,
             r.perclos,
             r.blink_rate,
-            r.yawn_prob,
+            r.yawn_rate,
             r.fatigue_landmark,
             r.quality,
         )
@@ -358,7 +364,7 @@ def main():
             arousal_calib = calib.calibrated_va_value(r.arousal, calib.arousal_baseline, calib.arousal_spread)
             perclos_calib = calib.calibrated_scalar_value(r.perclos, calib.perclos_baseline, calib.perclos_spread)
             blink_calib = calib.calibrated_scalar_value(r.blink_rate, calib.blink_baseline, calib.blink_spread)
-            yawn_calib = calib.calibrated_scalar_value(r.yawn_prob, calib.yawn_baseline, calib.yawn_spread)
+            yawn_calib = calib.calibrated_scalar_value(r.yawn_rate, calib.yawn_baseline, calib.yawn_spread)
             lmk_fatigue_calib = calib.calibrated_scalar_value(
                 r.fatigue_landmark, calib.lmk_fatigue_baseline, calib.lmk_fatigue_spread
             )
@@ -377,7 +383,7 @@ def main():
                 f'perclos_calib={"" if perclos_calib is None else f"{perclos_calib:.3f}"}\t'
                 f'blink_raw={"" if r.blink_rate is None else f"{r.blink_rate:.2f}"}\t'
                 f'blink_calib={"" if blink_calib is None else f"{blink_calib:.2f}"}\t'
-                f'yawn_raw={"" if r.yawn_prob is None else f"{r.yawn_prob:.2f}"}\t'
+                f'yawn_rate_raw={"" if r.yawn_rate is None else f"{r.yawn_rate:.2f}"}\t'
                 f'yawn_calib={"" if yawn_calib is None else f"{yawn_calib:.2f}"}\t'
                 f'lmk_fatigue_raw={"" if r.fatigue_landmark is None else f"{r.fatigue_landmark:.2f}"}\t'
                 f'lmk_fatigue_calib={"" if lmk_fatigue_calib is None else f"{lmk_fatigue_calib:.2f}"}\t'
@@ -433,7 +439,7 @@ def main():
         t(f'VA mode: {r.va_mode}', 68, (0, 220, 255) if r.va_mode == 'multimodal' else (255, 200, 0))
         perclos = '--' if r.perclos is None or np.isnan(r.perclos) else f'{r.perclos:.2f}'
         blink_rate = '--' if r.blink_rate is None or np.isnan(r.blink_rate) else f'{r.blink_rate:.1f}/min'
-        yawn = '--' if r.yawn_prob is None or np.isnan(r.yawn_prob) else f'{r.yawn_prob:.2f}'
+        yawn = '--' if r.yawn_rate is None or np.isnan(r.yawn_rate) else f'{r.yawn_rate:.2f}/min'
         lmk_fat = '--' if r.fatigue_landmark is None or np.isnan(r.fatigue_landmark) else f'{r.fatigue_landmark:.2f}'
         t(f'PERCLOS: {perclos}   Blink: {blink_rate}   Yawn: {yawn}', 88, (180, 255, 180))
         t(f'Landmark fatigue: {lmk_fat}', 108, (255, 220, 160))

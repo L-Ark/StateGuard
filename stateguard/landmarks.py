@@ -236,6 +236,9 @@ class EyeMetricsTracker:
         blink_window_sec: float = 60.0,
         yawn_open_thresh: float = 0.30,
         yawn_open_max: float = 0.55,
+        yawn_min_sec: float = 0.60,
+        yawn_max_sec: float = 3.00,
+        yawn_window_sec: float = 60.0,
     ) -> None:
         self.perclos_window_sec = float(perclos_window_sec)
         self.eye_closed_thresh = float(eye_closed_thresh)
@@ -244,10 +247,16 @@ class EyeMetricsTracker:
         self.blink_window_sec = float(blink_window_sec)
         self.yawn_open_thresh = float(yawn_open_thresh)
         self.yawn_open_max = float(yawn_open_max)
+        self.yawn_min_sec = float(yawn_min_sec)
+        self.yawn_max_sec = float(yawn_max_sec)
+        self.yawn_window_sec = float(yawn_window_sec)
         self._closed_samples = deque()
         self._blink_times = deque()
         self._is_closed = False
         self._closed_start = None
+        self._is_yawn_open = False
+        self._yawn_start = None
+        self._yawn_times = deque()
         self._last_metrics = {
             'ear': None,
             'eye_closed': None,
@@ -255,6 +264,7 @@ class EyeMetricsTracker:
             'blink_rate': None,
             'mouth_open': None,
             'yawn_prob': None,
+            'yawn_rate': None,
         }
 
     def update(self, landmarks: Optional[List[dict]], ts: Optional[float] = None) -> dict:
@@ -282,6 +292,20 @@ class EyeMetricsTracker:
         else:
             denom = max(1e-6, self.yawn_open_max - self.yawn_open_thresh)
             yawn_prob = float(np.clip((mar - self.yawn_open_thresh) / denom, 0.0, 1.0))
+
+        # Yawn detection: mouth open -> close with duration constraints
+        if mar is not None:
+            is_open = mar >= self.yawn_open_thresh
+            if is_open and not self._is_yawn_open:
+                self._is_yawn_open = True
+                self._yawn_start = ts
+            elif not is_open and self._is_yawn_open:
+                self._is_yawn_open = False
+                if self._yawn_start is not None:
+                    dur = ts - self._yawn_start
+                    if self.yawn_min_sec <= dur <= self.yawn_max_sec:
+                        self._yawn_times.append(ts)
+                self._yawn_start = None
 
         # PERCLOS (fraction of closed-eye samples in window)
         self._closed_samples.append((ts, closed))
@@ -311,6 +335,13 @@ class EyeMetricsTracker:
         else:
             blink_rate = None
 
+        while self._yawn_times and (ts - self._yawn_times[0]) > self.yawn_window_sec:
+            self._yawn_times.popleft()
+        if self.yawn_window_sec > 1e-6:
+            yawn_rate = float(len(self._yawn_times) * 60.0 / self.yawn_window_sec)
+        else:
+            yawn_rate = None
+
         self._last_metrics = {
             'ear': ear,
             'eye_closed': closed,
@@ -318,5 +349,6 @@ class EyeMetricsTracker:
             'blink_rate': blink_rate,
             'mouth_open': mar,
             'yawn_prob': yawn_prob,
+            'yawn_rate': yawn_rate,
         }
         return self._last_metrics
