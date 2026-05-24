@@ -1,11 +1,12 @@
-"""Rule-based four-quadrant state prediction.
+"""Rule-based five-region spectrum prediction.
 
 This module fuses the current rPPG / HRV / landmark-derived metrics into
-one of four high-level states:
-  - focus
+one of five high-level states:
+    - routine
+    - flow
   - overload
   - distraction
-  - fatigue
+    - exhaustion
 
 The goal is a stable, real-time estimate, not an intervention engine.
 """
@@ -47,6 +48,9 @@ def _inverse_normalize(value: Optional[float], low: float, high: float, *, defau
     return 1.0 - _normalize(value, low, high, default=default)
 
 
+SPECTRUM_CENTER_RATIO = 0.34
+
+
 @dataclass
 class QuadrantPrediction:
     key: str
@@ -69,24 +73,26 @@ class QuadrantPrediction:
 
 
 class QuadrantClassifier:
-    """Stable four-quadrant predictor.
+    """Stable five-region spectrum predictor.
 
     The classifier uses two latent axes:
     - activation: high means the user is cognitively engaged / aroused
     - depletion: high means the user is physiologically worn down
 
-    The four quadrants are then mapped as:
-    - focus:       high activation, low depletion
+    The regions are then mapped as:
+    - routine:     close to the center anchor
+    - flow:        high activation, low depletion
     - overload:    high activation, high depletion
     - distraction: low activation, low depletion
-    - fatigue:     low activation, high depletion
+    - exhaustion:  low activation, high depletion
     """
 
     LABELS = {
-        'focus': '深心流 / 高效专注',
+        'routine': '常态工作区 / 稳态',
+        'flow': '深心流 / 高效专注',
         'overload': '认知过载 / 焦虑焦躁',
         'distraction': '注意力涣散 / 走神散漫',
-        'fatigue': '生理耗尽 / 疲惫',
+        'exhaustion': '生理耗尽 / 疲惫',
     }
 
     def __init__(
@@ -103,10 +109,10 @@ class QuadrantClassifier:
         self._history: Deque[dict[str, float]] = deque(maxlen=self.maxlen)
         self._smoothed_activation: Optional[float] = None
         self._smoothed_depletion: Optional[float] = None
-        self._last_key: str = 'distraction'
+        self._last_key: str = 'routine'
         self._last_prediction = QuadrantPrediction(
-            key='distraction',
-            label=self.LABELS['distraction'],
+            key='routine',
+            label=self.LABELS['routine'],
             activation=0.0,
             depletion=0.0,
             confidence=0.0,
@@ -118,10 +124,10 @@ class QuadrantClassifier:
         self._history.clear()
         self._smoothed_activation = None
         self._smoothed_depletion = None
-        self._last_key = 'distraction'
+        self._last_key = 'routine'
         self._last_prediction = QuadrantPrediction(
-            key='distraction',
-            label=self.LABELS['distraction'],
+            key='routine',
+            label=self.LABELS['routine'],
             activation=0.0,
             depletion=0.0,
             confidence=0.0,
@@ -167,16 +173,10 @@ class QuadrantClassifier:
         depletion = _clip01(self._smoothed_depletion)
 
         scores = self._compute_scores(stats, activation, depletion)
-        best_key = max(scores, key=scores.get)
+        best_key = self._region_key(activation, depletion)
         best_score = scores[best_key]
         ranked = sorted(scores.values(), reverse=True)
         second_score = ranked[1] if len(ranked) > 1 else 0.0
-
-        # A small hysteresis prevents quadrant flicker when scores are close.
-        if self._last_key in scores and best_key != self._last_key:
-            if (best_score - scores[self._last_key]) < 0.08:
-                best_key = self._last_key
-                best_score = scores[best_key]
 
         confidence = _clip01((best_score - second_score) * 2.0)
         quality = _clip01(stats['quality'])
@@ -195,6 +195,17 @@ class QuadrantClassifier:
         self._last_key = best_key
         self._last_prediction = prediction
         return prediction
+
+    def _region_key(self, activation: float, depletion: float) -> str:
+        if float(np.hypot(activation - 0.5, depletion - 0.5)) <= SPECTRUM_CENTER_RATIO:
+            return 'routine'
+        if activation >= 0.5 and depletion < 0.5:
+            return 'flow'
+        if activation >= 0.5 and depletion >= 0.5:
+            return 'overload'
+        if activation < 0.5 and depletion < 0.5:
+            return 'distraction'
+        return 'exhaustion'
 
     def _is_ready(self) -> bool:
         if len(self._history) < self.min_samples:
@@ -304,17 +315,20 @@ class QuadrantClassifier:
         rmssd_high = _normalize(stats.get('rmssd'), 18.0, 60.0)
         perclos_high = _normalize(stats.get('perclos'), 0.08, 0.35)
         fatigue_high = _normalize(stats.get('fatigue'), 0.25, 0.80)
+        center_distance = float(np.hypot(activation - 0.5, depletion - 0.5))
+        routine = _clip01(1.0 - center_distance / max(0.05, SPECTRUM_CENTER_RATIO))
 
-        focus = activation * (1.0 - depletion) * (0.70 + 0.30 * rmssd_high) * (0.75 + 0.25 * valence_positive)
+        flow = activation * (1.0 - depletion) * (0.70 + 0.30 * rmssd_high) * (0.75 + 0.25 * valence_positive)
         overload = activation * depletion * (0.70 + 0.30 * valence_negative) * (0.70 + 0.30 * (1.0 - rmssd_high))
         distraction = (1.0 - activation) * (1.0 - depletion) * (0.75 + 0.25 * arousal_low) * (0.70 + 0.30 * (1.0 - valence_negative))
-        fatigue = (1.0 - activation) * depletion * (0.75 + 0.25 * perclos_high) * (0.75 + 0.25 * fatigue_high)
+        exhaustion = (1.0 - activation) * depletion * (0.75 + 0.25 * perclos_high) * (0.75 + 0.25 * fatigue_high)
 
         return {
-            'focus': _clip01(focus),
+            'routine': routine,
+            'flow': _clip01(flow),
             'overload': _clip01(overload),
             'distraction': _clip01(distraction),
-            'fatigue': _clip01(fatigue),
+            'exhaustion': _clip01(exhaustion),
         }
 
     def _reason_for(self, key: str, stats: Dict[str, float], activation: float, depletion: float) -> str:
@@ -326,7 +340,12 @@ class QuadrantClassifier:
         arousal = stats.get('arousal')
         fatigue = stats.get('fatigue')
 
-        if key == 'focus':
+        if key == 'routine':
+            return (
+                f'常态工作区，中心半径内（r<{SPECTRUM_CENTER_RATIO:.2f}）；'
+                f'HR={self._fmt(hr)} / RMSSD={self._fmt(rmssd)} / Blink={self._fmt(blink)}'
+            )
+        if key == 'flow':
             return (
                 f'激活高({activation:.2f})、耗竭低({depletion:.2f})；'
                 f'HR={self._fmt(hr)} / RMSSD={self._fmt(rmssd)} / Blink={self._fmt(blink)}'
@@ -336,7 +355,7 @@ class QuadrantClassifier:
                 f'激活高({activation:.2f})且耗竭上升({depletion:.2f})；'
                 f'Valence={self._fmt(valence)} / Arousal={self._fmt(arousal)} / RMSSD={self._fmt(rmssd)}'
             )
-        if key == 'fatigue':
+        if key == 'exhaustion':
             return (
                 f'激活低({activation:.2f})、耗竭高({depletion:.2f})；'
                 f'PERCLOS={self._fmt(perclos)} / Fatigue={self._fmt(fatigue)} / HR={self._fmt(hr)}'

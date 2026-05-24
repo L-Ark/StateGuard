@@ -12,7 +12,7 @@ import numpy as np
 from PySide6 import QtCore, QtGui, QtWidgets
 
 from stateguard.pipeline import StateGuardConfig, StateGuardPipeline
-from stateguard.quadrants import SpectrumClassifier, SpectrumPrediction
+from stateguard.quadrants import SPECTRUM_CENTER_RATIO, SpectrumClassifier, SpectrumPrediction
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -32,6 +32,18 @@ def _fmt(value: Optional[float], decimals: int = 2) -> str:
     except TypeError:
         pass
     return f'{float(value):.{decimals}f}'
+
+
+def measure_capture_fps(cap: cv2.VideoCapture, max_seconds: float = 3.0, sample_frames: int = 90) -> float:
+    start = time.time()
+    frames = 0
+    while frames < sample_frames and (time.time() - start) < max_seconds:
+        ok, _ = cap.read()
+        if not ok:
+            break
+        frames += 1
+    elapsed = time.time() - start
+    return frames / elapsed if elapsed > 0 else 0.0
 
 
 class SpectrumDashboardWidget(QtWidgets.QWidget):
@@ -89,9 +101,9 @@ class SpectrumDashboardWidget(QtWidgets.QWidget):
         routine_color = QtGui.QColor(palette['routine'])
         routine_color.setAlpha(115)
         center = plot.center()
-        center_radius = int(min(plot.width(), plot.height()) * 0.18)
+        center_radius = int(min(plot.width(), plot.height()) * SPECTRUM_CENTER_RATIO)
         painter.setBrush(routine_color)
-        painter.setPen(QtGui.QPen(QtGui.QColor('#dbeafe'), 2))
+        painter.setPen(QtGui.QPen(QtGui.QColor('#dbeafe'), 3))
         painter.drawEllipse(center, center_radius, center_radius)
 
         painter.setPen(QtGui.QPen(QtGui.QColor('#94a3b8'), 1))
@@ -110,7 +122,13 @@ class SpectrumDashboardWidget(QtWidgets.QWidget):
         painter.drawText(plot.right() - 72, plot.top() + 24, '深度心流')
         painter.drawText(plot.left() + 12, plot.bottom() - 12, '注意力涣散')
         painter.drawText(plot.right() - 72, plot.bottom() - 12, '生理耗尽')
-        painter.drawText(center.x() - 34, center.y() + 5, '常态工作区')
+        text_rect = QtCore.QRectF(
+            center.x() - center_radius,
+            center.y() - center_radius,
+            center_radius * 2,
+            center_radius * 2,
+        )
+        painter.drawText(text_rect, QtCore.Qt.AlignCenter, '常态工作区')
 
         axis_font = painter.font()
         axis_font.setPointSize(max(8, axis_font.pointSize() - 2))
@@ -118,7 +136,7 @@ class SpectrumDashboardWidget(QtWidgets.QWidget):
         painter.setFont(axis_font)
         painter.setPen(QtGui.QPen(QtGui.QColor('#cbd5e1')))
         painter.drawText(plot.left(), panel.bottom() - 20, 'X: 行为专注度')
-        painter.drawText(panel.right() - 128, panel.bottom() - 20, 'Y: 生理激活度')
+        painter.drawText(panel.right() - 128, panel.bottom() - 20, 'Y: 生理耗竭度')
 
         if self._prediction is None or not getattr(self._prediction, 'key', ''):
             painter.setPen(QtGui.QPen(QtGui.QColor('#94a3b8')))
@@ -381,8 +399,19 @@ class CameraPipelineWorker(QtCore.QThread):
             cap.set(cv2.CAP_PROP_FPS, 30)
 
             reported_fps = float(cap.get(cv2.CAP_PROP_FPS) or 0.0)
-            source_fps = reported_fps if reported_fps >= 1.0 else 30.0
+            measured_fps = measure_capture_fps(cap)
+            if measured_fps >= 1.0:
+                source_fps = measured_fps
+            elif reported_fps >= 1.0:
+                source_fps = reported_fps
+            else:
+                source_fps = 30.0
+
             target_fps = min(30.0, source_fps)
+            if source_fps < 30.0 - 0.5:
+                self.status_changed.emit(
+                    f'摄像头实际帧率较低({measured_fps:.2f})，管线降到 {target_fps:.1f} fps 以避免上采样。'
+                )
 
             cfg = StateGuardConfig(
                 facephys_path=self.facephys_path,
@@ -394,7 +423,7 @@ class CameraPipelineWorker(QtCore.QThread):
             pipeline = StateGuardPipeline(cfg)
             self._quadrant.reset()
             self.status_changed.emit(
-                f'摄像头已启动({backend_name}) | reported={reported_fps:.1f} fps | source={source_fps:.1f} fps | target={target_fps:.1f} fps'
+                f'摄像头已启动({backend_name}) | reported={reported_fps:.1f} fps | measured={measured_fps:.2f} fps | source={source_fps:.1f} fps | target={target_fps:.1f} fps'
             )
 
             warmup_deadline = time.time() + 3.0
