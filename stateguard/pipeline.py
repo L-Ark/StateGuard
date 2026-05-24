@@ -29,6 +29,7 @@ class FrameResult:
     rmssd: float
     sdnn: float
     quality: float
+    va_mode: str = 'vision'
     valence: Optional[float] = None  # filled in only when a VA window closes
     arousal: Optional[float] = None
     fatigue: Optional[float] = None  # P(fatigue) in [0,1]; refreshed each VA window
@@ -42,10 +43,15 @@ class StateGuardConfig:
     va_path: str
     state_path: Optional[str] = None
     fatigue_path: Optional[str] = None  # if None, fatigue head is disabled
-    # VA mode: 'vision' = image-only; 'multimodal' = fuse vision + rPPG features
-    va_mode: str = 'vision'
+    # VA mode: 'vision' = image-only; 'multimodal' = fuse vision + rPPG;
+    # 'auto' switches between the two using HRV quality.
+    va_mode: str = 'auto'
     # Fusion weight for vision logits when va_mode='multimodal' (0..1)
     fusion_alpha: float = 0.5
+    # In auto mode, q >= threshold selects multimodal; q <= threshold - hysteresis
+    # selects vision. This avoids flapping when quality hovers near the cutoff.
+    va_quality_threshold: float = 0.55
+    va_quality_hysteresis: float = 0.08
     fps: float = 30.0           # FacePhys was trained at 30fps; the pipeline
                                 # always processes frames at this rate. If the
                                 # source camera/video runs faster, set
@@ -84,6 +90,7 @@ class StateGuardPipeline:
         self._frames_in_window = 0
         self._last_va = (None, None)
         self._last_fatigue: Optional[float] = None
+        self._va_mode_active = 'vision'
         # Throttle HRV recompute (Welch+peaks is the per-frame hot path)
         self._hrv_every = max(1, int(round(cfg.fps)))  # ~1Hz
         self._hrv_counter = 0
@@ -102,6 +109,27 @@ class StateGuardPipeline:
         self._decim_acc = 0.0
         self._last_face_36 = None  # cache to repeat when frame is dropped (unused now)
 
+    def _resolve_va_mode(self, quality: float) -> str:
+        requested = str(self.cfg.va_mode).lower().strip()
+        if requested == 'vision':
+            self._va_mode_active = 'vision'
+            return self._va_mode_active
+        if requested == 'multimodal':
+            self._va_mode_active = 'multimodal'
+            return self._va_mode_active
+
+        # Auto mode: use multimodal only when quality is strong enough.
+        q = float(quality) if np.isfinite(quality) else 0.0
+        high = float(np.clip(getattr(self.cfg, 'va_quality_threshold', 0.55), 0.0, 1.0))
+        low = float(np.clip(high - getattr(self.cfg, 'va_quality_hysteresis', 0.08), 0.0, high))
+        if self._va_mode_active == 'multimodal':
+            if q <= low:
+                self._va_mode_active = 'vision'
+        else:
+            if q >= high:
+                self._va_mode_active = 'multimodal'
+        return self._va_mode_active
+
     def reset(self) -> None:
         self.rppg.reset(self.cfg.state_path)
         self.face.reset()
@@ -114,6 +142,7 @@ class StateGuardPipeline:
         self._frames_in_window = 0
         self._last_va = (None, None)
         self._last_fatigue = None
+        self._va_mode_active = 'vision'
         self._decim_acc = 0.0
         self._hrv_counter = 0
         self._hrv_cache = (float('nan'), float('nan'), float('nan'), 0.0)
@@ -136,10 +165,11 @@ class StateGuardPipeline:
         self._frames_in_window = 0
         if not self._win_frames:
             return None
+        hr, rmssd, sdnn, q = self.hrv.estimate()
+        self._va_mode_active = self._resolve_va_mode(q)
         # Optional gating: skip VA if HRV+quality looks fine
         run_va = True
         if self.cfg.gate_va:
-            hr, rmssd, sdnn, q = self.hrv.estimate()
             # Trigger VA only when signal is reliable AND something looks off:
             # low HRV (RMSSD < 25 ms) or unusually low/high HR.
             if not (q > 0.5 and (rmssd < 25.0 or hr < 50 or hr > 110)):
@@ -163,14 +193,12 @@ class StateGuardPipeline:
             vision_v = vis_v_logits.mean(axis=0)
             vision_a = vis_a_logits.mean(axis=0)
 
-            if str(self.cfg.va_mode).lower().strip() != 'multimodal':
+            if self._va_mode_active != 'multimodal':
                 # image-only: keep previous behavior (mean continuous preds)
                 out = preds.mean(axis=0)
                 self._last_va = (float(out[0]), float(out[1]))
             else:
                 # Multimodal: derive simple rPPG-based logits from HRV and fuse
-                hr, rmssd, sdnn, q = self.hrv.estimate()
-
                 def rppg_to_logits(hr, rmssd, sdnn, centers=(-1.0, 0.0, 1.0)):
                     # Normalize inputs to rough ranges and produce 3-class logits
                     # hr: ~40-120 bpm -> map to [-1,1]
@@ -223,8 +251,10 @@ class StateGuardPipeline:
         if self._decim_acc < 1.0 - 1e-6:
             # skip this frame at the model level
             hr, rmssd, sdnn, q = self._hrv_cache
+            mode = self._resolve_va_mode(q)
             return FrameResult(
                 bvp=float('nan'), hr=hr, rmssd=rmssd, sdnn=sdnn, quality=q,
+                va_mode=mode,
                 valence=self._last_va[0], arousal=self._last_va[1],
                 fatigue=self._last_fatigue,
                 face_box=None,
@@ -234,8 +264,10 @@ class StateGuardPipeline:
 
         face, box = self.face.crop(frame_rgb)
         if face is None:
+            mode = self._resolve_va_mode(self._hrv_cache[3])
             return FrameResult(bvp=float('nan'), hr=float('nan'), rmssd=float('nan'),
                                sdnn=float('nan'), quality=0.0,
+                               va_mode=mode,
                                valence=self._last_va[0], arousal=self._last_va[1],
                                fatigue=self._last_fatigue,
                                va_updated=False)
@@ -258,8 +290,10 @@ class StateGuardPipeline:
             self._hrv_cache = self.hrv.estimate()
             self._hrv_counter = 0
         hr, rmssd, sdnn, q = self._hrv_cache
+        mode = self._resolve_va_mode(q)
         return FrameResult(
             bvp=bvp, hr=hr, rmssd=rmssd, sdnn=sdnn, quality=q,
+            va_mode=mode,
             valence=self._last_va[0], arousal=self._last_va[1],
             fatigue=self._last_fatigue,
             face_box=box,

@@ -14,7 +14,7 @@ StateGuard 是 FacePhys + VA 多模态轻量推理管线的本地部署包。
 ```
 
 - **FacePhys** 是逐帧流式 ONNX (`InfinitePulse.step`)，状态在调用间持续，**无窗口延迟**。
-- **VA** 模型每 15 秒只对 4 个均匀采样关键帧推理一次（验证 1–5% 关键帧基本无损），可选门控（仅在 HRV 异常时激活）。
+- **VA** 模型每 15 秒只对 4 个均匀采样关键帧推理一次（验证 1–5% 关键帧基本无损）。默认会根据 rPPG 质量自动在 **single-modal(vision)** 和 **multimodal** 之间切换：质量高时使用多模态，画质差或置信度低时回退到单模态。
 - **Fatigue** 模型与 VA 共用同一组关键帧（112×112 RGB），同窗口推理，每窗口 +8 ms（4 帧 × ~2 ms）。
 - **HRV** 估计 (Welch + peaks) 限制为 ~1 Hz，避免拖慢每帧。
 
@@ -83,19 +83,28 @@ python smoke_test.py
 ```powershell
 python examples\run_video.py path\to\some\video.mp4 --out result.csv
 ```
+默认会同时生成一个同名 txt 日志，例如 `result.txt`，每一行包含本机时间戳和对应状态值。
 
 ### 3.3 实时摄像头 demo
 
 ```powershell
 python examples\run_webcam.py --cam 0
 ```
-按 `q` 退出。窗口里会显示人脸框、BVP 波形条、HR / RMSSD / SDNN、最新 V/A 和 Fatigue 概率。
+启动后会先进入个人疲劳基线校准，默认约 90 秒，建议保持自然放松、正视摄像头，不要刻意做表情。校准完成后再进入正常监测。
+按 `q` 退出。窗口里会显示人脸框、BVP 波形条、HR / RMSSD / SDNN、最新 V/A、校准后的 Fatigue 以及个人基线。
+同时会生成 `stateguard_webcam.txt`，按帧记录本机系统时间、原始 fatigue、校准后 fatigue 和基线值。
 
 如果你已经创建了 `.venv`，也可以直接双击根目录的 `run_webcam.bat` 启动。
 
 参数：
 - `--cam N`：摄像头索引（默认 0）。
 - `--gate-va`：开启 VA 门控（HRV 异常时才激活），降低 CPU。
+- `--va-mode auto|vision|multimodal`：默认 `auto`，会根据 rPPG quality 自动切换。
+- `--va-quality-threshold` / `--va-quality-hysteresis`：控制 auto 模式下切换到/退出 multimodal 的阈值。
+- `--calib-sec`：个人基线校准时长，默认 90 秒，建议 60-180 秒。
+- `--calib-min-quality`：校准时允许收集 fatigue 样本的最低 HRV quality。
+- `--calib-min-samples`：完成校准所需的最少有效窗口数。
+- `--txt-log PATH`：指定 txt 日志文件路径。每帧会记录系统时间、bvp、hr、rmssd、sdnn、quality、va_mode、V/A、fatigue。
 
 启动时会先测一次摄像头实际 FPS；如果摄像头低于 30 fps，程序会自动降到实际帧率运行，避免上采样报错。
 
@@ -199,8 +208,10 @@ logits = fat.predict_logits(faces)   # (N, 2) — [normal_logit, fatigue_logit]
 | `gate_va` | False | 节能模式，HRV 异常时才跑 VA（fatigue 同样仅在该窗口运行） |
 | `fatigue_path` | None | 设为 `weights/fatigue.onnx` 启用 fatigue 头；和 VA 共用关键帧，每窗口 +8 ms |
 | `num_threads` | 1 | 模型小，单线程最优；多线程反而引入调度抖动 |
-| `va_mode` | vision | 'vision' = image-only VA; 'multimodal' = fuse vision + rPPG heuristically |
+| `va_mode` | auto | `auto` = 按 rPPG quality 自动在 vision / multimodal 间切换；也可固定为 `vision` 或 `multimodal` |
 | `fusion_alpha` | 0.5 | When `va_mode=multimodal`, vision weight in fusion (0..1) |
+| `va_quality_threshold` | 0.55 | `auto` 模式下，quality 高于该值时切换到 multimodal |
+| `va_quality_hysteresis` | 0.08 | `auto` 模式下的回切滞回，避免 mode 在阈值附近抖动 |
 | `FaceCropper(detect_every_n=5)` | 5 | 检测稀疏度；帧间用平滑插值 |
 
 > ⚠️ **关于 fps 配置**：FacePhys 在 30 fps 上训练。如果你的摄像头是 60 fps，**必须**把 `source_fps=60` 传进来，否则模型会以为时间流逝速率是真实的 2×，HR 估计会错。修复前 smoke test 上 HR 错了 ~33%。在 Windows 上摄像头默认通常是 30 fps，在某些笔记本/外接设备上会是 60 fps，请用 `cap.get(cv2.CAP_PROP_FPS)` 实际查询。
@@ -213,6 +224,7 @@ logits = fat.predict_logits(faces)   # (N, 2) — [normal_logit, fatigue_logit]
 - **首 15 秒 V/A 为 None**：第一个 VA 窗口尚未关闭，正常。UI 显示 `--`。
 - **首 15 秒 Fatigue 为 None**：与 VA 同步，第一个窗口关闭前为 None。
 - **首 5 秒 HR 为 NaN**：HRV 窗未填够，正常。
+- **VA mode 显示为 vision**：通常表示当前 rPPG 质量偏低，auto 模式已回退到单模态；画质恢复后会自动切回 multimodal。
 
 ## 7. 未来扩展指引
 
