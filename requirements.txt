@@ -6,3 +6,4 @@ onnxruntime>=1.17
 scipy>=1.11
 mediapipe>=0.10  ; python_version < "3.13"   # optional, falls back to Haar if missing
 psutil>=5.9                                    # only used by bench scripts
+PySide6>=6.5          # GUI (optional)
