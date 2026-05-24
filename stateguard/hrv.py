@@ -11,9 +11,10 @@ from scipy import signal as sig
 
 
 class HRVStream:
-    def __init__(self, fps: float = 30.0, window_sec: float = 30.0) -> None:
+    def __init__(self, fps: float = 30.0, window_sec: float = 30.0, warmup_sec: float = 12.0) -> None:
         self.fps = float(fps)
         self.window_sec = float(window_sec)
+        self.warmup_sec = float(warmup_sec)
         self._buf: deque = deque(maxlen=int(self.fps * self.window_sec))
         # cached bandpass filter
         self._b, self._a = sig.butter(
@@ -27,7 +28,7 @@ class HRVStream:
         return len(self._buf)
 
     def filtered(self) -> np.ndarray:
-        if len(self._buf) < int(self.fps * 5):
+        if len(self._buf) < int(self.fps * self.warmup_sec):
             return np.array([], dtype=np.float32)
         x = np.asarray(self._buf, dtype=np.float32)
         try:
@@ -49,7 +50,7 @@ class HRVStream:
         NOT just a count ratio (which would inflate under noise).
         """
         x = self.filtered()
-        if x.size < int(self.fps * 5):
+        if x.size < int(self.fps * self.warmup_sec):
             return float('nan'), float('nan'), float('nan'), 0.0
 
         # 1) HR from Welch — primary, drift-resistant

@@ -33,6 +33,7 @@ class FrameResult:
     arousal: Optional[float] = None
     fatigue: Optional[float] = None  # P(fatigue) in [0,1]; refreshed each VA window
     face_box: Optional[tuple] = None
+    va_updated: bool = False
 
 
 @dataclass
@@ -49,6 +50,7 @@ class StateGuardConfig:
     va_window_sec: float = 15.0
     va_keyframes: int = 4
     hrv_window_sec: float = 30.0
+    hrv_warmup_sec: float = 12.0
     gate_va: bool = False
     num_threads: int = 1
 
@@ -66,7 +68,11 @@ class StateGuardPipeline:
             FatigueRunner(cfg.fatigue_path, num_threads=cfg.num_threads)
             if cfg.fatigue_path else None
         )
-        self.hrv = HRVStream(fps=cfg.fps, window_sec=cfg.hrv_window_sec)
+        self.hrv = HRVStream(
+            fps=cfg.fps,
+            window_sec=cfg.hrv_window_sec,
+            warmup_sec=cfg.hrv_warmup_sec,
+        )
 
         self._win_frames: List[np.ndarray] = []  # 224x224 RGB uint8 keyframe candidates
         self._win_idx_target = max(1, int(cfg.va_keyframes))
@@ -95,7 +101,11 @@ class StateGuardPipeline:
     def reset(self) -> None:
         self.rppg.reset(self.cfg.state_path)
         self.face.reset()
-        self.hrv = HRVStream(fps=self.cfg.fps, window_sec=self.cfg.hrv_window_sec)
+        self.hrv = HRVStream(
+            fps=self.cfg.fps,
+            window_sec=self.cfg.hrv_window_sec,
+            warmup_sec=self.cfg.hrv_warmup_sec,
+        )
         self._win_frames.clear()
         self._frames_in_window = 0
         self._last_va = (None, None)
@@ -160,6 +170,7 @@ class StateGuardPipeline:
                 valence=self._last_va[0], arousal=self._last_va[1],
                 fatigue=self._last_fatigue,
                 face_box=None,
+                va_updated=False,
             )
         self._decim_acc -= 1.0
 
@@ -168,7 +179,8 @@ class StateGuardPipeline:
             return FrameResult(bvp=float('nan'), hr=float('nan'), rmssd=float('nan'),
                                sdnn=float('nan'), quality=0.0,
                                valence=self._last_va[0], arousal=self._last_va[1],
-                               fatigue=self._last_fatigue)
+                               fatigue=self._last_fatigue,
+                               va_updated=False)
 
         # Per-frame rPPG
         face_36 = cv2.resize(face, (36, 36), interpolation=cv2.INTER_AREA)
@@ -193,4 +205,5 @@ class StateGuardPipeline:
             valence=self._last_va[0], arousal=self._last_va[1],
             fatigue=self._last_fatigue,
             face_box=box,
+            va_updated=(new_va is not None),
         )

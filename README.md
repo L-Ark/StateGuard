@@ -91,9 +91,13 @@ python examples\run_webcam.py --cam 0
 ```
 按 `q` 退出。窗口里会显示人脸框、BVP 波形条、HR / RMSSD / SDNN、最新 V/A 和 Fatigue 概率。
 
+如果你已经创建了 `.venv`，也可以直接双击根目录的 `run_webcam.bat` 启动。
+
 参数：
 - `--cam N`：摄像头索引（默认 0）。
 - `--gate-va`：开启 VA 门控（HRV 异常时才激活），降低 CPU。
+
+启动时会先测一次摄像头实际 FPS；如果摄像头低于 30 fps，程序会自动降到实际帧率运行，避免上采样报错。
 
 ## 4. 在 UI 中集成（关键 API）
 
