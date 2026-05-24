@@ -136,7 +136,7 @@ class SpectrumDashboardWidget(QtWidgets.QWidget):
         painter.setFont(axis_font)
         painter.setPen(QtGui.QPen(QtGui.QColor('#cbd5e1')))
         painter.drawText(plot.left(), panel.bottom() - 20, 'X: 行为专注度')
-        painter.drawText(panel.right() - 128, panel.bottom() - 20, 'Y: 生理耗竭度')
+        painter.drawText(panel.right() - 128, panel.bottom() - 20, 'Y: 生理激活度')
 
         if self._prediction is None or not getattr(self._prediction, 'key', ''):
             painter.setPen(QtGui.QPen(QtGui.QColor('#94a3b8')))
@@ -905,7 +905,7 @@ class MainWindow(QtWidgets.QMainWindow):
                     QtCore.Qt.SmoothTransformation,
                 )
             )
-        if result is None:
+        if result is None or not quadrant.key:
             return
         self.metric_labels['hr'].setText(_fmt(getattr(result, 'hr', None), 1))
         self.metric_labels['rmssd'].setText(_fmt(getattr(result, 'rmssd', None), 1))
@@ -933,6 +933,8 @@ class MainWindow(QtWidgets.QMainWindow):
             self.metric_labels['fatigue_calib'].setText('--')
             self.metric_labels['lmk_calib'].setText('--')
 
+        # keep last frame result for recorder
+        self._last_frame_result = result
         self._update_quadrant_display(quadrant)
 
     def _update_quadrant_display(self, quadrant: object) -> None:
@@ -1010,11 +1012,52 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         self._last_record_second = current_second
         self._last_record_key = quadrant.key
+        # collect last pipeline result if available
+        result = getattr(self, '_last_frame_result', None)
+        calib = getattr(self.worker, '_calibrator', None) if getattr(self, 'worker', None) is not None else None
+        fatigue_calib = None
+        lmk_calib = None
+        try:
+            if calib is not None:
+                fatigue_calib = calib.calibrated_value(getattr(result, 'fatigue', None))
+                lmk_calib = calib.calibrated_scalar_value(
+                    getattr(result, 'fatigue_landmark', None),
+                    calib.lmk_fatigue_baseline,
+                    calib.lmk_fatigue_spread,
+                )
+        except Exception:
+            fatigue_calib = None
+            lmk_calib = None
+
+        hr = _fmt(getattr(result, 'hr', None), 1)
+        rmssd = _fmt(getattr(result, 'rmssd', None), 1)
+        sdnn = _fmt(getattr(result, 'sdnn', None), 1)
+        quality = _fmt(getattr(result, 'quality', None), 2)
+        va_mode = str(getattr(result, 'va_mode', '--'))
+        valence = _fmt(getattr(result, 'valence', None), 2)
+        arousal = _fmt(getattr(result, 'arousal', None), 2)
+        fatigue = _fmt(getattr(result, 'fatigue', None), 2)
+        fatigue_calib_s = _fmt(fatigue_calib, 2) if fatigue_calib is not None else '--'
+        fatigue_lmk = _fmt(getattr(result, 'fatigue_landmark', None), 2)
+        lmk_calib_s = _fmt(lmk_calib, 2) if lmk_calib is not None else '--'
+        perclos = _fmt(getattr(result, 'perclos', None), 2)
+        blink_rate = _fmt(getattr(result, 'blink_rate', None), 2)
+        yawn_rate = _fmt(getattr(result, 'yawn_rate', None), 2)
+        bvp = _fmt(getattr(result, 'bvp', None), 6)
+        face_box = str(getattr(result, 'face_box', None))
+        landmarks_count = str(len(getattr(result, 'landmarks', []) or []))
+
         line = (
-            f'{now.isoformat(timespec="seconds")}\t'
-            f'{quadrant.key}\t{quadrant.label}\t'
-            f'confidence={quadrant.confidence:.2f}\t'
-            f'x={quadrant.x:.2f}\ty={quadrant.y:.2f}\n'
+            f"{now.isoformat(timespec='seconds')}\t"
+            f"{quadrant.key}\t{quadrant.label}\t"
+            f"confidence={quadrant.confidence:.2f}\t"
+            f"x={quadrant.x:.2f}\t y={quadrant.y:.2f}\t"
+            f"hr={hr}\trmssd={rmssd}\tsdnn={sdnn}\tquality={quality}\t"
+            f"va_mode={va_mode}\tvalence={valence}\tarousal={arousal}\t"
+            f"fatigue={fatigue}\tfatigue_calib={fatigue_calib_s}\t"
+            f"fatigue_lmk={fatigue_lmk}\tlmk_calib={lmk_calib_s}\t"
+            f"perclos={perclos}\tblink_rate={blink_rate}\tyawn_rate={yawn_rate}\t"
+            f"bvp={bvp}\tface_box={face_box}\tlandmarks={landmarks_count}\n"
         )
         try:
             self._record_fp.write(line)
