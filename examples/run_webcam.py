@@ -20,6 +20,7 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from stateguard import StateGuardPipeline, StateGuardConfig
+from stateguard.landmarks import FaceMeshRunner
 
 
 @dataclass
@@ -222,6 +223,16 @@ def main():
         va_quality_hysteresis=args.va_quality_hysteresis,
     ))
 
+    # Initialize mediapipe FaceMesh for real-time landmarks (optional)
+    fm_runner = None
+    try:
+        fm_runner = FaceMeshRunner()
+        fm_runner.ensure_model_loaded()
+        print('FaceMesh: loaded')
+    except Exception as e:
+        fm_runner = None
+        print(f'FaceMesh: unavailable ({e})')
+
     bvp_buf = deque(maxlen=300)  # 10s plot
     print('Press q to quit.')
     print(f'Txt log: {args.txt_log}')
@@ -287,6 +298,15 @@ def main():
             print(f'New window result: mode={r.va_mode}  V={v}  A={a}  Fatigue={f_str}')
 
         disp = frame.copy()
+        # Draw landmarks if available
+        if fm_runner is not None:
+            try:
+                # fm_runner.process expects RGB
+                fm_runner.process(rgb)
+                fm_runner.draw_landmarks(disp, None)
+            except Exception:
+                # don't break UI on landmark errors
+                pass
         if r.face_box:
             x1, y1, x2, y2 = r.face_box
             cv2.rectangle(disp, (x1, y1), (x2, y2), (0, 255, 0), 2)

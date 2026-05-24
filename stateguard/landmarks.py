@@ -53,6 +53,7 @@ class FaceMeshRunner:
         if im.ndim != 3 or im.shape[2] != 3:
             raise ValueError('frame_rgb must be HxWx3 RGB uint8')
         results = self._mesh.process(im)
+        self._last_results = results
         if not results or not results.multi_face_landmarks:
             return None
         lm = results.multi_face_landmarks[0]
@@ -63,13 +64,27 @@ class FaceMeshRunner:
 
     def draw_landmarks(self, image_bgr: np.ndarray, landmarks) -> None:
         """Draw the landmarks on a BGR image in-place (for display)."""
-        if landmarks is None:
+        # Draw using the stored mediapipe results if available.
+        if not hasattr(self, '_last_results') or self._last_results is None:
             return
-        # Mediapipe expects the full results object; we reuse drawing helpers
-        # by reconstructing a simple wrapper. Instead, call the library draw
-        # directly if we still have the last result available. For simplicity
-        # expect callers to keep the original mediapipe results when drawing.
-        raise NotImplementedError('Use mediapipe drawing helpers with the raw results from FaceMesh')
+        results = self._last_results
+        if not results.multi_face_landmarks:
+            return
+        for landmarks in results.multi_face_landmarks:
+            self._drawing.draw_landmarks(
+                image_bgr,
+                landmarks,
+                self._fm.FACEMESH_TESSELATION,
+                landmark_drawing_spec=None,
+                connection_drawing_spec=self._styles.get_default_face_mesh_tesselation_style(),
+            )
+            self._drawing.draw_landmarks(
+                image_bgr,
+                landmarks,
+                self._fm.FACEMESH_CONTOURS,
+                landmark_drawing_spec=None,
+                connection_drawing_spec=self._styles.get_default_face_mesh_contours_style(),
+            )
 
     def close(self) -> None:
         try:
