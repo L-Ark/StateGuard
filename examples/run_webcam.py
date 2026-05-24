@@ -178,6 +178,10 @@ def main():
     ap.add_argument('--calib-min-samples', type=int, default=4, help='Minimum valid fatigue windows required to finish calibration')
     ap.add_argument('--calib-sample-sec', type=float, default=5.0, help='Minimum seconds between fatigue calibration samples')
     ap.add_argument('--txt-log', default='stateguard_webcam.txt', help='Path to txt log file with system timestamps')
+    ap.add_argument('--perclos-window-sec', type=float, default=60.0, help='Window (s) for PERCLOS and blink rate')
+    ap.add_argument('--eye-closed-thresh', type=float, default=0.20, help='EAR threshold below which eye is closed')
+    ap.add_argument('--blink-min-sec', type=float, default=0.05, help='Minimum blink duration (s)')
+    ap.add_argument('--blink-max-sec', type=float, default=0.60, help='Maximum blink duration (s)')
     args = ap.parse_args()
 
     w = Path(args.weights)
@@ -221,6 +225,11 @@ def main():
         fusion_alpha=args.fusion_alpha,
         va_quality_threshold=args.va_quality_threshold,
         va_quality_hysteresis=args.va_quality_hysteresis,
+        perclos_window_sec=args.perclos_window_sec,
+        eye_closed_thresh=args.eye_closed_thresh,
+        blink_min_sec=args.blink_min_sec,
+        blink_max_sec=args.blink_max_sec,
+        blink_window_sec=args.perclos_window_sec,
     ))
 
     # Initialize mediapipe FaceMesh for real-time landmarks (optional)
@@ -282,6 +291,8 @@ def main():
                 f'arousal_raw={"" if r.arousal is None else f"{r.arousal:.3f}"}\t'
                 f'valence_calib={"" if valence_calib is None else f"{valence_calib:.3f}"}\t'
                 f'arousal_calib={"" if arousal_calib is None else f"{arousal_calib:.3f}"}\t'
+                f'perclos={"" if r.perclos is None else f"{r.perclos:.3f}"}\t'
+                f'blink_rate={"" if r.blink_rate is None else f"{r.blink_rate:.2f}"}\t'
                 f'va_calib_state={"ready" if calib.finished else "calibrating"}\n'
             )
             logf.flush()
@@ -332,30 +343,33 @@ def main():
         t(f'HR: {hr} bpm   q={q}', 28)
         t(f'RMSSD: {rmssd} ms   SDNN: {sdnn} ms', 52)
         t(f'VA mode: {r.va_mode}', 68, (0, 220, 255) if r.va_mode == 'multimodal' else (255, 200, 0))
+        perclos = '--' if r.perclos is None or np.isnan(r.perclos) else f'{r.perclos:.2f}'
+        blink_rate = '--' if r.blink_rate is None or np.isnan(r.blink_rate) else f'{r.blink_rate:.1f}/min'
+        t(f'PERCLOS: {perclos}   Blink: {blink_rate}', 88, (180, 255, 180))
         v = '--' if r.valence is None or np.isnan(r.valence) else f'{r.valence:+.2f}'
         a = '--' if r.arousal is None or np.isnan(r.arousal) else f'{r.arousal:+.2f}'
         if calib.finished:
             f_raw = '--' if r.fatigue is None or np.isnan(r.fatigue) else f'{r.fatigue:.2f}'
             f_cal = '--' if fatigue_calib is None or np.isnan(fatigue_calib) else f'{fatigue_calib:.2f}'
             f_color = (0, 255, 255) if fatigue_calib is None or np.isnan(fatigue_calib) or fatigue_calib < 0.5 else (0, 80, 255)
-            t(f'Fatigue (calib): {f_cal}   raw: {f_raw}', 92, f_color)
+            t(f'Fatigue (calib): {f_cal}   raw: {f_raw}', 112, f_color)
             if calib.baseline is not None:
-                t(f'Personal baseline: {calib.baseline:.2f}', 116, (180, 180, 180))
-            t(f'Calibration: {calib.confidence_text()}', 140, (255, 220, 120) if len(calib.samples) < calib.min_samples else (120, 255, 120))
+                t(f'Personal baseline: {calib.baseline:.2f}', 136, (180, 180, 180))
+            t(f'Calibration: {calib.confidence_text()}', 160, (255, 220, 120) if len(calib.samples) < calib.min_samples else (120, 255, 120))
             v_cal = '--' if valence_calib is None or np.isnan(valence_calib) else f'{valence_calib:+.2f}'
             a_cal = '--' if arousal_calib is None or np.isnan(arousal_calib) else f'{arousal_calib:+.2f}'
-            t(f'V: {v_cal}   A: {a_cal}', 164, (0, 255, 255))
-            t(f'Raw V/A: {v} / {a}', 188, (180, 180, 180))
+            t(f'V: {v_cal}   A: {a_cal}', 184, (0, 255, 255))
+            t(f'Raw V/A: {v} / {a}', 208, (180, 180, 180))
         else:
             remain = int(round(calib.remaining()))
             mm = remain // 60
             ss = remain % 60
             target_windows = max(calib.min_samples, int(round(calib.duration_sec / max(0.5, calib.sample_every_sec))))
-            t(f'Calibration in progress: {mm:02d}:{ss:02d} remaining', 92, (0, 200, 255))
-            t('Please stay relaxed and keep your face visible', 116, (0, 200, 255))
-            t(f'Collected samples: {len(calib.samples)}/{target_windows}', 140, (255, 255, 255))
-            t('VA will be calibrated after this phase', 164, (255, 255, 255))
-            t(f'Raw V: {v}   Raw A: {a}', 188, (0, 255, 255))
+            t(f'Calibration in progress: {mm:02d}:{ss:02d} remaining', 112, (0, 200, 255))
+            t('Please stay relaxed and keep your face visible', 136, (0, 200, 255))
+            t(f'Collected samples: {len(calib.samples)}/{target_windows}', 160, (255, 255, 255))
+            t('VA will be calibrated after this phase', 184, (255, 255, 255))
+            t(f'Raw V: {v}   Raw A: {a}', 208, (0, 255, 255))
 
         cv2.imshow('StateGuard', disp)
         if cv2.waitKey(1) & 0xFF == ord('q'):

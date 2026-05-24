@@ -11,6 +11,7 @@ This class is the single integration point a UI should consume.
 """
 from dataclasses import dataclass, field
 from typing import Callable, Optional, List
+import time
 
 import numpy as np
 
@@ -21,9 +22,10 @@ from .models.face import FaceCropper
 from .hrv import HRVStream
 import cv2
 try:
-    from .landmarks import FaceMeshRunner
+    from .landmarks import FaceMeshRunner, EyeMetricsTracker
 except Exception:
     FaceMeshRunner = None
+    EyeMetricsTracker = None
 
 
 @dataclass
@@ -39,6 +41,10 @@ class FrameResult:
     fatigue: Optional[float] = None  # P(fatigue) in [0,1]; refreshed each VA window
     face_box: Optional[tuple] = None
     landmarks: Optional[List[dict]] = None
+    eye_ear: Optional[float] = None
+    eye_closed: Optional[bool] = None
+    perclos: Optional[float] = None
+    blink_rate: Optional[float] = None
     va_updated: bool = False
 
 
@@ -68,6 +74,13 @@ class StateGuardConfig:
     hrv_warmup_sec: float = 12.0
     gate_va: bool = False
     num_threads: int = 1
+    # Eye metrics (PERCLOS / blink rate) from face landmarks
+    enable_eye_metrics: bool = True
+    perclos_window_sec: float = 60.0
+    eye_closed_thresh: float = 0.20
+    blink_min_sec: float = 0.05
+    blink_max_sec: float = 0.60
+    blink_window_sec: float = 60.0
 
 
 class StateGuardPipeline:
@@ -98,12 +111,25 @@ class StateGuardPipeline:
         self._va_mode_active = 'vision'
         self._fm_runner = None
         self._last_landmarks = None
+        self._eye_tracker = None
+        self._last_eye_ear = None
+        self._last_eye_closed = None
+        self._last_perclos = None
+        self._last_blink_rate = None
         if FaceMeshRunner is not None:
             try:
                 self._fm_runner = FaceMeshRunner()
                 self._fm_runner.ensure_model_loaded()
             except Exception:
                 self._fm_runner = None
+        if EyeMetricsTracker is not None and self._fm_runner is not None and self.cfg.enable_eye_metrics:
+            self._eye_tracker = EyeMetricsTracker(
+                perclos_window_sec=self.cfg.perclos_window_sec,
+                eye_closed_thresh=self.cfg.eye_closed_thresh,
+                blink_min_sec=self.cfg.blink_min_sec,
+                blink_max_sec=self.cfg.blink_max_sec,
+                blink_window_sec=self.cfg.blink_window_sec,
+            )
         # Throttle HRV recompute (Welch+peaks is the per-frame hot path)
         self._hrv_every = max(1, int(round(cfg.fps)))  # ~1Hz
         self._hrv_counter = 0
@@ -164,12 +190,25 @@ class StateGuardPipeline:
             pass
         self._fm_runner = None
         self._last_landmarks = None
+        self._eye_tracker = None
+        self._last_eye_ear = None
+        self._last_eye_closed = None
+        self._last_perclos = None
+        self._last_blink_rate = None
         if FaceMeshRunner is not None:
             try:
                 self._fm_runner = FaceMeshRunner()
                 self._fm_runner.ensure_model_loaded()
             except Exception:
                 self._fm_runner = None
+        if EyeMetricsTracker is not None and self._fm_runner is not None and self.cfg.enable_eye_metrics:
+            self._eye_tracker = EyeMetricsTracker(
+                perclos_window_sec=self.cfg.perclos_window_sec,
+                eye_closed_thresh=self.cfg.eye_closed_thresh,
+                blink_min_sec=self.cfg.blink_min_sec,
+                blink_max_sec=self.cfg.blink_max_sec,
+                blink_window_sec=self.cfg.blink_window_sec,
+            )
         self._decim_acc = 0.0
         self._hrv_counter = 0
         self._hrv_cache = (float('nan'), float('nan'), float('nan'), 0.0)
@@ -285,6 +324,10 @@ class StateGuardPipeline:
                 valence=self._last_va[0], arousal=self._last_va[1],
                 fatigue=self._last_fatigue,
                 landmarks=self._last_landmarks,
+                eye_ear=self._last_eye_ear,
+                eye_closed=self._last_eye_closed,
+                perclos=self._last_perclos,
+                blink_rate=self._last_blink_rate,
                 face_box=None,
                 va_updated=False,
             )
@@ -299,6 +342,10 @@ class StateGuardPipeline:
                                valence=self._last_va[0], arousal=self._last_va[1],
                                fatigue=self._last_fatigue,
                                landmarks=self._last_landmarks,
+                               eye_ear=self._last_eye_ear,
+                               eye_closed=self._last_eye_closed,
+                               perclos=self._last_perclos,
+                               blink_rate=self._last_blink_rate,
                                va_updated=False)
 
         # Per-frame rPPG
@@ -314,6 +361,12 @@ class StateGuardPipeline:
             except Exception:
                 # keep previous landmarks on error
                 pass
+        if self._eye_tracker is not None:
+            metrics = self._eye_tracker.update(self._last_landmarks, time.time())
+            self._last_eye_ear = metrics.get('ear')
+            self._last_eye_closed = metrics.get('eye_closed')
+            self._last_perclos = metrics.get('perclos')
+            self._last_blink_rate = metrics.get('blink_rate')
 
         # Collect keyframes for VA
         self._maybe_collect_keyframe(face)
@@ -335,5 +388,10 @@ class StateGuardPipeline:
             valence=self._last_va[0], arousal=self._last_va[1],
             fatigue=self._last_fatigue,
             face_box=box,
+            landmarks=self._last_landmarks,
+            eye_ear=self._last_eye_ear,
+            eye_closed=self._last_eye_closed,
+            perclos=self._last_perclos,
+            blink_rate=self._last_blink_rate,
             va_updated=(new_va is not None),
         )

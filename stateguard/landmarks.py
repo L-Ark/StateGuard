@@ -9,6 +9,8 @@ from __future__ import annotations
 from typing import List, Optional
 from pathlib import Path
 import urllib.request
+from collections import deque
+import time
 import numpy as np
 
 try:
@@ -177,3 +179,110 @@ class FaceMeshRunner:
         except Exception:
             # ignore errors; purpose is warm-up
             pass
+
+
+# Eye landmark indices for MediaPipe Face Mesh
+_LEFT_EYE = (33, 160, 158, 133, 153, 144)
+_RIGHT_EYE = (362, 385, 387, 263, 373, 380)
+
+
+def _eye_aspect_ratio(landmarks: List[dict], idxs) -> Optional[float]:
+    try:
+        p1, p2, p3, p4, p5, p6 = [landmarks[i] for i in idxs]
+    except Exception:
+        return None
+
+    def _dist(a, b) -> float:
+        dx = float(a['x']) - float(b['x'])
+        dy = float(a['y']) - float(b['y'])
+        return float((dx * dx + dy * dy) ** 0.5)
+
+    v1 = _dist(p2, p6)
+    v2 = _dist(p3, p5)
+    h = _dist(p1, p4)
+    if h <= 1e-6:
+        return None
+    return (v1 + v2) / (2.0 * h)
+
+
+class EyeMetricsTracker:
+    """Compute eye openness, PERCLOS, and blink rate from landmarks."""
+
+    def __init__(
+        self,
+        perclos_window_sec: float = 60.0,
+        eye_closed_thresh: float = 0.20,
+        blink_min_sec: float = 0.05,
+        blink_max_sec: float = 0.60,
+        blink_window_sec: float = 60.0,
+    ) -> None:
+        self.perclos_window_sec = float(perclos_window_sec)
+        self.eye_closed_thresh = float(eye_closed_thresh)
+        self.blink_min_sec = float(blink_min_sec)
+        self.blink_max_sec = float(blink_max_sec)
+        self.blink_window_sec = float(blink_window_sec)
+        self._closed_samples = deque()
+        self._blink_times = deque()
+        self._is_closed = False
+        self._closed_start = None
+        self._last_metrics = {
+            'ear': None,
+            'eye_closed': None,
+            'perclos': None,
+            'blink_rate': None,
+        }
+
+    def update(self, landmarks: Optional[List[dict]], ts: Optional[float] = None) -> dict:
+        if ts is None:
+            ts = time.time()
+        if not landmarks:
+            return self._last_metrics
+
+        ear_l = _eye_aspect_ratio(landmarks, _LEFT_EYE)
+        ear_r = _eye_aspect_ratio(landmarks, _RIGHT_EYE)
+        if ear_l is None and ear_r is None:
+            return self._last_metrics
+        if ear_l is None:
+            ear = float(ear_r)
+        elif ear_r is None:
+            ear = float(ear_l)
+        else:
+            ear = float((ear_l + ear_r) * 0.5)
+
+        closed = ear < self.eye_closed_thresh
+
+        # PERCLOS (fraction of closed-eye samples in window)
+        self._closed_samples.append((ts, closed))
+        while self._closed_samples and (ts - self._closed_samples[0][0]) > self.perclos_window_sec:
+            self._closed_samples.popleft()
+        if self._closed_samples:
+            perclos = float(sum(1 for _, c in self._closed_samples if c) / len(self._closed_samples))
+        else:
+            perclos = None
+
+        # Blink detection: open -> closed -> open with duration constraints
+        if closed and not self._is_closed:
+            self._is_closed = True
+            self._closed_start = ts
+        elif not closed and self._is_closed:
+            self._is_closed = False
+            if self._closed_start is not None:
+                dur = ts - self._closed_start
+                if self.blink_min_sec <= dur <= self.blink_max_sec:
+                    self._blink_times.append(ts)
+            self._closed_start = None
+
+        while self._blink_times and (ts - self._blink_times[0]) > self.blink_window_sec:
+            self._blink_times.popleft()
+        if self.blink_window_sec > 1e-6:
+            blink_rate = float(len(self._blink_times) * 60.0 / self.blink_window_sec)
+        else:
+            blink_rate = None
+
+        self._last_metrics = {
+            'ear': ear,
+            'eye_closed': closed,
+            'perclos': perclos,
+            'blink_rate': blink_rate,
+        }
+        return self._last_metrics
