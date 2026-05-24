@@ -29,7 +29,91 @@ StateGuard 是 FacePhys + VA 多模态轻量推理管线的本地部署包。
 
 以 30 fps 输入，**~4× 实时余量**（实测 ≈64 fps 处理 60 fps 视频），CPU 占用单核 60% 以下。可直接在普通笔记本上跑。
 
-## 2. 目录结构
+## 2. 状态评估依据与公式
+
+StateGuard 采用双轴连续光谱：先把多源信号压成两条连续轴，再用这两条轴对当前状态打分。
+
+### 2.1 就绪门槛
+
+状态判定前，必须同时满足：
+
+- 历史样本数达到 `24` 帧；
+- 历史中至少有 `2` 类有效特征源非空。
+
+有效特征源包括：`hr`、`rmssd`、`sdnn`、`quality`、`perclos`、`blink_rate`、`yawn_rate`、`fatigue`、`fatigue_landmark`、`arousal`、`valence`。
+
+### 2.2 连续轴
+
+行为专注度轴：
+
+$$
+A = \operatorname{clip}_{[0,1]}(0.35\hat a + 0.30\hat h + 0.20\hat b + 0.15\hat q)
+$$
+
+其中：
+
+- $\hat a = \text{norm}(arousal; -0.2, 0.8)$
+- $\hat h = \text{norm}(hr; 58, 98)$
+- $\hat b = 1 - \text{norm}(blink\_rate; 8, 22)$
+- $\hat q = \text{norm}(quality; 0.3, 0.9)$
+
+生理耗竭轴：
+
+$$
+D = \operatorname{clip}_{[0,1]}(0.30\hat p + 0.25\hat f + 0.15\hat l + 0.20\hat r + 0.10\hat y)
+$$
+
+其中：
+
+- $\hat p = \text{norm}(perclos; 0.08, 0.35)$
+- $\hat f = \text{norm}(fatigue; 0.25, 0.80)$
+- $\hat l = \text{norm}(fatigue\_landmark; 0.20, 0.80)$
+- $\hat r = 1 - \text{norm}(rmssd; 18, 60)$
+- $\hat y = \text{norm}(yawn\_rate; 0.4, 2.0)$
+
+### 2.3 五区域打分
+
+在连续轴 $A/D$ 上分别计算区域分数，取最大者作为当前状态：
+
+$$
+S_{focus} = A(1-D)(0.70 + 0.30\widehat{rmssd})(0.75 + 0.25\widehat{valence}_{+})
+$$
+
+$$
+S_{overload} = AD(0.70 + 0.30\widehat{valence}_{-})(0.70 + 0.30(1-\widehat{rmssd}))
+$$
+
+$$
+S_{distraction} = (1-A)(1-D)(0.75 + 0.25\widehat{arousal}_{low})(0.70 + 0.30(1-\widehat{valence}_{-}))
+$$
+
+$$
+S_{fatigue} = (1-A)D(0.75 + 0.25\widehat{perclos})(0.75 + 0.25\widehat{fatigue})
+$$
+
+其中：
+
+- $\widehat{rmssd} = \text{norm}(rmssd; 18, 60)$
+- $\widehat{valence}_{+} = \text{norm}(valence; 0, 0.8)$
+- $\widehat{valence}_{-} = \text{norm}(-valence; 0, 0.8)$
+- $\widehat{arousal}_{low} = 1 - \text{norm}(arousal; -0.2, 0.6)$
+- $\widehat{perclos} = \text{norm}(perclos; 0.08, 0.35)$
+- $\widehat{fatigue} = \text{norm}(fatigue; 0.25, 0.80)$
+
+### 2.4 输出字段
+
+- `x`：行为专注度轴 $A$
+- `y`：生理耗竭轴 $D$
+- `confidence`：由最大分数和次大分数差值结合 `quality` 调整
+- `reason`：展示当前状态的主导特征组合，便于界面和日志追踪
+
+### 2.5 说明
+
+- `quality` 主要来自 HRV / rPPG 观测质量，用于辅助激活轴和最终置信度。
+- `fatigue_landmark` 由 PERCLOS、眨眼频率、打哈欠频率融合得到，先参与校准，再进入耗竭轴。
+- 光谱页中的仪表盘会把实时坐标点画到五区域平面上，中心为“常态工作区”。
+
+## 3. 目录结构
 
 ```
 deploy/
@@ -55,9 +139,9 @@ deploy/
     └── run_webcam.py          # 实时摄像头 OpenCV demo
 ```
 
-## 3. Windows 安装与运行
+## 4. Windows 安装与运行
 
-### 3.1 准备环境
+### 4.1 准备环境
 
 推荐 **Python 3.10 或 3.11**（与 mediapipe 兼容）。
 
@@ -73,7 +157,7 @@ pip install -r requirements.txt
 
 如果 mediapipe 安装失败，可以忽略 → 自动回退到 OpenCV Haar 人脸检测（精度略低，仍可用）。
 
-### 3.2 验证安装
+### 4.2 验证安装
 
 ```powershell
 python smoke_test.py
@@ -85,7 +169,7 @@ python examples\run_video.py path\to\some\video.mp4 --out result.csv
 ```
 默认会同时生成一个同名 txt 日志，例如 `result.txt`，每一行包含本机时间戳和对应状态值。
 
-### 3.3 实时摄像头 demo
+### 4.3 实时摄像头 demo
 
 ```powershell
 python examples\run_webcam.py --cam 0
@@ -108,7 +192,7 @@ python examples\run_webcam.py --cam 0
 
 启动时会先测一次摄像头实际 FPS；如果摄像头低于 30 fps，程序会自动降到实际帧率运行，避免上采样报错。
 
-## 4. 在 UI 中集成（关键 API）
+## 5. 在 UI 中集成（关键 API）
 
 建议把 StateGuard 作为后台线程跑，UI 只消费 `FrameResult`：
 
@@ -197,7 +281,7 @@ logits = fat.predict_logits(faces)   # (N, 2) — [normal_logit, fatigue_logit]
 - 默认 0.5 作为告警阈值；若希望更稳健，可累计连续 N 个窗口（≥ 30s）的 `r.fatigue > 0.5` 才触发干预。
 - 与 rPPG 联动：`r.fatigue > 0.5 且 r.rmssd 低于个人基线` 是更可靠的疲劳信号（生理 + 表情两证）。
 
-## 5. 调优开关
+## 6. 调优开关
 
 | 选项 | 默认 | 说明 |
 |---|---|---|
@@ -216,7 +300,7 @@ logits = fat.predict_logits(faces)   # (N, 2) — [normal_logit, fatigue_logit]
 
 > ⚠️ **关于 fps 配置**：FacePhys 在 30 fps 上训练。如果你的摄像头是 60 fps，**必须**把 `source_fps=60` 传进来，否则模型会以为时间流逝速率是真实的 2×，HR 估计会错。修复前 smoke test 上 HR 错了 ~33%。在 Windows 上摄像头默认通常是 30 fps，在某些笔记本/外接设备上会是 60 fps，请用 `cap.get(cv2.CAP_PROP_FPS)` 实际查询。
 
-## 6. 已知坑
+## 7. 已知坑
 
 - **Windows 摄像头权限**：首次运行需在系统设置里授权 Python。
 - **MediaPipe wheel**：3.13+ 暂无官方 wheel；用 3.10/3.11，或忽略它走 Haar。
@@ -226,7 +310,7 @@ logits = fat.predict_logits(faces)   # (N, 2) — [normal_logit, fatigue_logit]
 - **首 5 秒 HR 为 NaN**：HRV 窗未填够，正常。
 - **VA mode 显示为 vision**：通常表示当前 rPPG 质量偏低，auto 模式已回退到单模态；画质恢复后会自动切回 multimodal。
 
-## 7. 未来扩展指引
+## 8. 未来扩展指引
 
 - **打包为 .exe**：用 `pyinstaller --collect-all mediapipe --collect-all onnxruntime examples/run_webcam.py`。注意把 `stateguard/weights/` 加入 `--add-data`。
 - **GPU 加速（非必须）**：把 ONNX Runtime 换成 `onnxruntime-gpu`，providers 里加 `CUDAExecutionProvider`。当前 CPU 已 3× 实时，不需要 GPU。

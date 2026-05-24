@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import sys
 import time
+from datetime import datetime
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
@@ -11,6 +12,7 @@ import numpy as np
 from PySide6 import QtCore, QtGui, QtWidgets
 
 from stateguard.pipeline import StateGuardConfig, StateGuardPipeline
+from stateguard.quadrants import SpectrumClassifier, SpectrumPrediction
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -30,6 +32,117 @@ def _fmt(value: Optional[float], decimals: int = 2) -> str:
     except TypeError:
         pass
     return f'{float(value):.{decimals}f}'
+
+
+class SpectrumDashboardWidget(QtWidgets.QWidget):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._prediction: Optional[SpectrumPrediction] = None
+        self.setMinimumHeight(360)
+        self.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Expanding)
+
+    def set_prediction(self, prediction: Optional[SpectrumPrediction]) -> None:
+        self._prediction = prediction
+        self.update()
+
+    def clear_prediction(self) -> None:
+        self._prediction = None
+        self.update()
+
+    def sizeHint(self) -> QtCore.QSize:
+        return QtCore.QSize(520, 420)
+
+    def paintEvent(self, event: QtGui.QPaintEvent) -> None:
+        painter = QtGui.QPainter(self)
+        painter.setRenderHint(QtGui.QPainter.Antialiasing, True)
+        painter.fillRect(self.rect(), QtGui.QColor('#0b1020'))
+
+        panel = self.rect().adjusted(10, 10, -10, -10)
+        painter.setPen(QtCore.Qt.NoPen)
+        painter.setBrush(QtGui.QColor('#111827'))
+        painter.drawRoundedRect(panel, 18, 18)
+
+        plot = panel.adjusted(26, 24, -26, -72)
+        if plot.width() < 40 or plot.height() < 40:
+            return
+
+        palette = {
+            'routine': QtGui.QColor('#2563eb'),
+            'flow': QtGui.QColor('#16a34a'),
+            'overload': QtGui.QColor('#d73a49'),
+            'distraction': QtGui.QColor('#f59e0b'),
+            'exhaustion': QtGui.QColor('#7c3aed'),
+        }
+
+        def _fill_region(x: int, y: int, w: int, h: int, color: QtGui.QColor) -> None:
+            rgba = QtGui.QColor(color)
+            rgba.setAlpha(70)
+            painter.fillRect(QtCore.QRect(x, y, w, h), rgba)
+
+        half_w = plot.width() // 2
+        half_h = plot.height() // 2
+        _fill_region(plot.left(), plot.top(), half_w, half_h, palette['overload'])
+        _fill_region(plot.left() + half_w, plot.top(), plot.width() - half_w, half_h, palette['flow'])
+        _fill_region(plot.left(), plot.top() + half_h, half_w, plot.height() - half_h, palette['distraction'])
+        _fill_region(plot.left() + half_w, plot.top() + half_h, plot.width() - half_w, plot.height() - half_h, palette['exhaustion'])
+
+        routine_color = QtGui.QColor(palette['routine'])
+        routine_color.setAlpha(115)
+        center = plot.center()
+        center_radius = int(min(plot.width(), plot.height()) * 0.18)
+        painter.setBrush(routine_color)
+        painter.setPen(QtGui.QPen(QtGui.QColor('#dbeafe'), 2))
+        painter.drawEllipse(center, center_radius, center_radius)
+
+        painter.setPen(QtGui.QPen(QtGui.QColor('#94a3b8'), 1))
+        painter.setBrush(QtCore.Qt.NoBrush)
+        painter.drawRect(plot)
+        painter.drawLine(plot.center().x(), plot.top(), plot.center().x(), plot.bottom())
+        painter.drawLine(plot.left(), plot.center().y(), plot.right(), plot.center().y())
+
+        label_pen = QtGui.QPen(QtGui.QColor('#e2e8f0'))
+        painter.setPen(label_pen)
+        label_font = painter.font()
+        label_font.setPointSize(max(9, label_font.pointSize() - 1))
+        label_font.setBold(True)
+        painter.setFont(label_font)
+        painter.drawText(plot.left() + 12, plot.top() + 24, '认知过载')
+        painter.drawText(plot.right() - 72, plot.top() + 24, '深度心流')
+        painter.drawText(plot.left() + 12, plot.bottom() - 12, '注意力涣散')
+        painter.drawText(plot.right() - 72, plot.bottom() - 12, '生理耗尽')
+        painter.drawText(center.x() - 34, center.y() + 5, '常态工作区')
+
+        axis_font = painter.font()
+        axis_font.setPointSize(max(8, axis_font.pointSize() - 2))
+        axis_font.setBold(False)
+        painter.setFont(axis_font)
+        painter.setPen(QtGui.QPen(QtGui.QColor('#cbd5e1')))
+        painter.drawText(plot.left(), panel.bottom() - 20, 'X: 行为专注度')
+        painter.drawText(panel.right() - 128, panel.bottom() - 20, 'Y: 生理激活度')
+
+        if self._prediction is None or not getattr(self._prediction, 'key', ''):
+            painter.setPen(QtGui.QPen(QtGui.QColor('#94a3b8')))
+            painter.drawText(plot.adjusted(0, 0, -12, -12), QtCore.Qt.AlignCenter, '等待稳定信号')
+            return
+
+        x = float(np.clip(getattr(self._prediction, 'x', 0.5), 0.0, 1.0))
+        y = float(np.clip(getattr(self._prediction, 'y', 0.5), 0.0, 1.0))
+        point_x = plot.left() + x * plot.width()
+        point_y = plot.bottom() - y * plot.height()
+
+        point_color = QtGui.QColor(palette.get(getattr(self._prediction, 'key', ''), QtGui.QColor('#e5e7eb')))
+        painter.setPen(QtGui.QPen(QtGui.QColor('white'), 2))
+        painter.setBrush(point_color)
+        painter.drawEllipse(QtCore.QPointF(point_x, point_y), 9, 9)
+        painter.setPen(QtGui.QPen(point_color, 1, QtCore.Qt.DashLine))
+        painter.drawLine(QtCore.QPointF(point_x, plot.top()), QtCore.QPointF(point_x, plot.bottom()))
+        painter.drawLine(QtCore.QPointF(plot.left(), point_y), QtCore.QPointF(plot.right(), point_y))
+
+        info = f'{self._prediction.label}   x={x:.2f}   y={y:.2f}'
+        info_rect = QtCore.QRect(plot.left(), panel.bottom() - 54, plot.width(), 22)
+        painter.setPen(QtGui.QPen(QtGui.QColor('#e2e8f0')))
+        painter.drawText(info_rect, QtCore.Qt.AlignLeft | QtCore.Qt.AlignVCenter, info)
+
 
 
 @dataclass
@@ -165,7 +278,7 @@ class FatigueCalibrator:
 
 
 class CameraPipelineWorker(QtCore.QThread):
-    frame_ready = QtCore.Signal(object, object)
+    frame_ready = QtCore.Signal(object, object, object)
     status_changed = QtCore.Signal(str)
     calibration_changed = QtCore.Signal(str)
     error = QtCore.Signal(str)
@@ -188,6 +301,7 @@ class CameraPipelineWorker(QtCore.QThread):
         self._show_landmarks = True
         self._show_face_box = True
         self._last_calib_second: Optional[int] = None
+        self._quadrant = SpectrumClassifier(window_sec=12.0, max_fps=30.0, smoothing=0.25)
 
     def request_calibration(self, duration_sec: float, min_quality: float, min_samples: int, sample_every_sec: float) -> None:
         self._calibrator = FatigueCalibrator(
@@ -233,10 +347,33 @@ class CameraPipelineWorker(QtCore.QThread):
         h, w, ch = rgb.shape
         return QtGui.QImage(rgb.data, w, h, ch * w, QtGui.QImage.Format_RGB888).copy()
 
+    @staticmethod
+    def _open_camera(camera_index: int) -> tuple[Optional[cv2.VideoCapture], str]:
+        backends = [
+            ('DSHOW', getattr(cv2, 'CAP_DSHOW', None)),
+            ('MSMF', getattr(cv2, 'CAP_MSMF', None)),
+            ('ANY', getattr(cv2, 'CAP_ANY', None)),
+        ]
+        for name, backend in backends:
+            try:
+                if backend is None:
+                    cap = cv2.VideoCapture(int(camera_index))
+                else:
+                    cap = cv2.VideoCapture(int(camera_index), int(backend))
+                if cap.isOpened():
+                    return cap, name
+                cap.release()
+            except Exception:
+                try:
+                    cap.release()
+                except Exception:
+                    pass
+        return None, 'NONE'
+
     def run(self) -> None:
         try:
-            cap = cv2.VideoCapture(int(self.camera_index))
-            if not cap.isOpened():
+            cap, backend_name = self._open_camera(int(self.camera_index))
+            if cap is None or not cap.isOpened():
                 self.error.emit(f'无法打开摄像头 {self.camera_index}')
                 return
             cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
@@ -255,13 +392,25 @@ class CameraPipelineWorker(QtCore.QThread):
                 source_fps=source_fps,
             )
             pipeline = StateGuardPipeline(cfg)
+            self._quadrant.reset()
             self.status_changed.emit(
-                f'摄像头已启动 | reported={reported_fps:.1f} fps | source={source_fps:.1f} fps | target={target_fps:.1f} fps'
+                f'摄像头已启动({backend_name}) | reported={reported_fps:.1f} fps | source={source_fps:.1f} fps | target={target_fps:.1f} fps'
             )
+
+            warmup_deadline = time.time() + 3.0
+            warmup_reads = 0
 
             while not self._stop:
                 ok, frame = cap.read()
                 if not ok:
+                    if time.time() <= warmup_deadline:
+                        time.sleep(0.05)
+                        warmup_reads += 1
+                        continue
+                    self.error.emit('摄像头已打开，但连续读取失败。请切换设备索引，或检查 Windows 相机权限/占用情况。')
+                    break
+                warmup_reads += 1
+                if warmup_reads <= 3:
                     time.sleep(0.02)
                     continue
 
@@ -287,6 +436,8 @@ class CameraPipelineWorker(QtCore.QThread):
                             f'校准完成：{self._calibrator.confidence_text()}'
                         )
 
+                quadrant = self._quadrant.update(result, self._calibrator)
+
                 display = frame.copy()
                 if self._show_landmarks and result.landmarks:
                     self._draw_landmarks(display, result.landmarks, result.face_box)
@@ -294,7 +445,7 @@ class CameraPipelineWorker(QtCore.QThread):
                     x1, y1, x2, y2 = result.face_box
                     cv2.rectangle(display, (x1, y1), (x2, y2), (0, 255, 0), 2)
 
-                self.frame_ready.emit(self._to_qimage(display), result)
+                self.frame_ready.emit(self._to_qimage(display), result, quadrant)
                 time.sleep(max(0.0, 1.0 / max(target_fps, 1.0) * 0.2))
 
             cap.release()
@@ -309,6 +460,19 @@ class MainWindow(QtWidgets.QMainWindow):
         self.resize(1400, 860)
         self.worker: Optional[CameraPipelineWorker] = None
         self._pending_model_reload = False
+        self._recording = False
+        self._record_fp = None
+        self._record_path: Optional[Path] = None
+        self._last_record_second: Optional[int] = None
+        self._last_record_key: Optional[str] = None
+        self._quadrant_ui_key: Optional[str] = None
+        self._quadrant_ui_candidate_key: Optional[str] = None
+        self._quadrant_ui_candidate_seen_at: float = 0.0
+        self._quadrant_ui_last_update_at: float = 0.0
+        self._quadrant_ui_last_confidence: float = -1.0
+        self._quadrant_ui_waiting_shown: bool = False
+        self._calibration_ui_text: str = '等待校准'
+        self._calibration_ui_active: bool = False
 
         self._build_ui()
         self._load_default_models()
@@ -328,9 +492,53 @@ class MainWindow(QtWidgets.QMainWindow):
         self.video_label.setStyleSheet('background: #111; color: #ddd; border: 1px solid #333;')
         root.addWidget(self.video_label, 3)
 
-        side = QtWidgets.QVBoxLayout()
-        side.setSpacing(10)
-        root.addLayout(side, 2)
+        tabs = QtWidgets.QTabWidget()
+        tabs.setDocumentMode(True)
+        tabs.setUsesScrollButtons(True)
+        tabs.setElideMode(QtCore.Qt.ElideRight)
+        root.addWidget(tabs, 2)
+
+        self._overview_page = QtWidgets.QWidget()
+        self._overview_page_layout = QtWidgets.QVBoxLayout(self._overview_page)
+        self._overview_page_layout.setContentsMargins(0, 0, 0, 0)
+        self._overview_page_layout.setSpacing(0)
+        self._overview_scroll = QtWidgets.QScrollArea()
+        self._overview_scroll.setWidgetResizable(True)
+        self._overview_scroll.setFrameShape(QtWidgets.QFrame.NoFrame)
+        self._overview_content = QtWidgets.QWidget()
+        self._overview_layout = QtWidgets.QVBoxLayout(self._overview_content)
+        self._overview_layout.setContentsMargins(0, 0, 0, 0)
+        self._overview_layout.setSpacing(10)
+        self._overview_scroll.setWidget(self._overview_content)
+        self._overview_page_layout.addWidget(self._overview_scroll)
+
+        self._metrics_page = QtWidgets.QWidget()
+        self._metrics_page_layout = QtWidgets.QVBoxLayout(self._metrics_page)
+        self._metrics_page_layout.setContentsMargins(0, 0, 0, 0)
+        self._metrics_page_layout.setSpacing(0)
+        self._metrics_scroll = QtWidgets.QScrollArea()
+        self._metrics_scroll.setWidgetResizable(True)
+        self._metrics_scroll.setFrameShape(QtWidgets.QFrame.NoFrame)
+        self._metrics_content = QtWidgets.QWidget()
+        self._metrics_layout = QtWidgets.QVBoxLayout(self._metrics_content)
+        self._metrics_layout.setContentsMargins(0, 0, 0, 0)
+        self._metrics_layout.setSpacing(10)
+        self._metrics_scroll.setWidget(self._metrics_content)
+        self._metrics_page_layout.addWidget(self._metrics_scroll)
+
+        self._quadrant_page = QtWidgets.QWidget()
+        self._quadrant_page_layout = QtWidgets.QVBoxLayout(self._quadrant_page)
+        self._quadrant_page_layout.setContentsMargins(0, 0, 0, 0)
+        self._quadrant_page_layout.setSpacing(0)
+        self._quadrant_scroll = QtWidgets.QScrollArea()
+        self._quadrant_scroll.setWidgetResizable(True)
+        self._quadrant_scroll.setFrameShape(QtWidgets.QFrame.NoFrame)
+        self._quadrant_content = QtWidgets.QWidget()
+        self._quadrant_layout = QtWidgets.QVBoxLayout(self._quadrant_content)
+        self._quadrant_layout.setContentsMargins(0, 0, 0, 0)
+        self._quadrant_layout.setSpacing(10)
+        self._quadrant_scroll.setWidget(self._quadrant_content)
+        self._quadrant_page_layout.addWidget(self._quadrant_scroll)
 
         camera_box = QtWidgets.QGroupBox('摄像头')
         camera_form = QtWidgets.QFormLayout(camera_box)
@@ -344,6 +552,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self.start_btn = QtWidgets.QPushButton('开始')
         self.stop_btn = QtWidgets.QPushButton('停止')
         self.stop_btn.setEnabled(False)
+        self.record_btn = QtWidgets.QPushButton('开始记录')
+        self.record_btn.setCheckable(True)
+        self.record_path_label = QtWidgets.QLabel('未选择记录文件')
+        self.record_path_label.setWordWrap(True)
         btn_row = QtWidgets.QHBoxLayout()
         btn_row.addWidget(self.start_btn)
         btn_row.addWidget(self.stop_btn)
@@ -351,7 +563,9 @@ class MainWindow(QtWidgets.QMainWindow):
         camera_form.addRow(self.show_landmarks)
         camera_form.addRow(self.show_face_box)
         camera_form.addRow(btn_row)
-        side.addWidget(camera_box)
+        camera_form.addRow(self.record_btn)
+        camera_form.addRow('记录文件', self.record_path_label)
+        self._overview_layout.addWidget(camera_box)
 
         model_box = QtWidgets.QGroupBox('模型选择')
         model_form = QtWidgets.QFormLayout(model_box)
@@ -363,7 +577,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._add_path_row(model_form, 'Fatigue', self.fatigue_edit)
         self.apply_models_btn = QtWidgets.QPushButton('应用模型')
         model_form.addRow(self.apply_models_btn)
-        side.addWidget(model_box)
+        self._overview_layout.addWidget(model_box)
 
         calib_box = QtWidgets.QGroupBox('校准')
         calib_form = QtWidgets.QFormLayout(calib_box)
@@ -392,7 +606,8 @@ class MainWindow(QtWidgets.QMainWindow):
         calib_form.addRow(self.calib_btn)
         calib_form.addRow('进度', self.calib_progress)
         calib_form.addRow('状态', self.calib_status)
-        side.addWidget(calib_box)
+        self._overview_layout.addWidget(calib_box)
+        self._overview_layout.addStretch(1)
 
         metrics_box = QtWidgets.QGroupBox('实时指标')
         metrics_grid = QtWidgets.QGridLayout(metrics_box)
@@ -414,13 +629,57 @@ class MainWindow(QtWidgets.QMainWindow):
             value.setTextInteractionFlags(QtCore.Qt.TextSelectableByMouse)
             metrics_grid.addWidget(value, row, col + 1)
             self.metric_labels[key] = value
-        side.addWidget(metrics_box)
-        side.addStretch(1)
+        self._metrics_layout.addWidget(metrics_box)
+
+        status_box = QtWidgets.QGroupBox('状态总览')
+        status_layout = QtWidgets.QVBoxLayout(status_box)
+        self.overall_status_label = QtWidgets.QLabel('等待稳定信号')
+        self.overall_status_label.setWordWrap(True)
+        self.overall_status_label.setAlignment(QtCore.Qt.AlignCenter)
+        self.overall_status_label.setMinimumHeight(88)
+        self.overall_status_label.setStyleSheet(
+            'background-color: #333; color: white; padding: 12px 16px; border-radius: 10px; '
+            'font-size: 16px; font-weight: 700;'
+        )
+        status_layout.addWidget(self.overall_status_label)
+        self._metrics_layout.addWidget(status_box)
+        self._metrics_layout.addStretch(1)
+
+        quadrant_box = QtWidgets.QGroupBox('双轴连续光谱')
+        quadrant_form = QtWidgets.QFormLayout(quadrant_box)
+        self.quadrant_state = QtWidgets.QLabel('--')
+        self.quadrant_x = QtWidgets.QLabel('--')
+        self.quadrant_y = QtWidgets.QLabel('--')
+        self.quadrant_confidence = QtWidgets.QLabel('--')
+        self.quadrant_reason = QtWidgets.QLabel('等待稳定信号')
+        self.quadrant_state.setAlignment(QtCore.Qt.AlignCenter)
+        self.quadrant_reason.setWordWrap(True)
+        self.quadrant_reason.setStyleSheet('color: #111111; font-size: 14px; font-weight: 600;')
+        self.quadrant_state.setMinimumHeight(54)
+        self.quadrant_state.setMinimumWidth(220)
+        self.quadrant_state.setStyleSheet(
+            'background-color: #444; color: white; padding: 10px 14px; border-radius: 8px; '
+            'font-size: 18px; font-weight: 700;'
+        )
+        quadrant_form.addRow('状态', self.quadrant_state)
+        quadrant_form.addRow('行为专注度 X', self.quadrant_x)
+        quadrant_form.addRow('生理激活度 Y', self.quadrant_y)
+        quadrant_form.addRow('置信度', self.quadrant_confidence)
+        quadrant_form.addRow('判定依据', self.quadrant_reason)
+        self.spectrum_dashboard = SpectrumDashboardWidget()
+        self._quadrant_layout.addWidget(self.spectrum_dashboard)
+        self._quadrant_layout.addWidget(quadrant_box)
+        self._quadrant_layout.addStretch(1)
+
+        tabs.addTab(self._overview_page, '概览')
+        tabs.addTab(self._metrics_page, '指标')
+        tabs.addTab(self._quadrant_page, '光谱')
 
         self.start_btn.clicked.connect(self.start_camera)
         self.stop_btn.clicked.connect(self.stop_camera)
         self.apply_models_btn.clicked.connect(self.apply_models)
         self.calib_btn.clicked.connect(self.begin_calibration)
+        self.record_btn.toggled.connect(self.toggle_recording)
         self.show_landmarks.toggled.connect(self._sync_display_options)
         self.show_face_box.toggled.connect(self._sync_display_options)
 
@@ -448,6 +707,52 @@ class MainWindow(QtWidgets.QMainWindow):
         self.facephys_edit.setText(_default_model_path('step.onnx'))
         self.va_edit.setText(_default_model_path('va_mbf.onnx'))
         self.fatigue_edit.setText(_default_model_path('fatigue.onnx'))
+
+    def _default_record_path(self) -> Path:
+        logs_dir = REPO_ROOT / 'logs'
+        logs_dir.mkdir(parents=True, exist_ok=True)
+        stamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        return logs_dir / f'stateguard_record_{stamp}.txt'
+
+    def _open_record_file(self, path: Optional[Path] = None) -> None:
+        if self._record_fp is not None:
+            return
+        target = path or self._default_record_path()
+        target.parent.mkdir(parents=True, exist_ok=True)
+        self._record_fp = open(target, 'a', encoding='utf-8')
+        self._record_path = target
+        self.record_path_label.setText(str(target))
+        self.status_bar.showMessage(f'记录已开始：{target}')
+
+    def _close_record_file(self) -> None:
+        if self._record_fp is not None:
+            try:
+                self._record_fp.flush()
+                self._record_fp.close()
+            except Exception:
+                pass
+        self._record_fp = None
+        self._record_path = None
+
+    def toggle_recording(self, checked: bool) -> None:
+        if checked:
+            path_text, _ = QtWidgets.QFileDialog.getSaveFileName(
+                self,
+                '选择记录文件',
+                str(self._default_record_path()),
+                'Text files (*.txt);;All files (*)',
+            )
+            record_path = Path(path_text) if path_text else self._default_record_path()
+            self._open_record_file(record_path)
+            self._recording = True
+            self.record_btn.setText('停止记录')
+            self._last_record_second = None
+            self._last_record_key = None
+        else:
+            self._recording = False
+            self._close_record_file()
+            self.record_btn.setText('开始记录')
+            self.status_bar.showMessage('记录已停止')
 
     def _current_model_paths(self) -> tuple[str, str, str]:
         return self.facephys_edit.text().strip(), self.va_edit.text().strip(), self.fatigue_edit.text().strip()
@@ -486,6 +791,12 @@ class MainWindow(QtWidgets.QMainWindow):
             self.worker = None
         self.start_btn.setEnabled(True)
         self.stop_btn.setEnabled(False)
+        self._calibration_ui_active = False
+        if self.record_btn.isChecked():
+            self.record_btn.blockSignals(True)
+            self.record_btn.setChecked(False)
+            self.record_btn.blockSignals(False)
+            self.toggle_recording(False)
 
     def apply_models(self) -> None:
         if self.worker is None:
@@ -510,6 +821,9 @@ class MainWindow(QtWidgets.QMainWindow):
             self.start_camera()
         if self.worker is not None:
             self.calib_progress.setValue(0)
+            self._calibration_ui_active = True
+            self._calibration_ui_text = '校准中'
+            self._refresh_overall_status_label()
             self.worker.request_calibration(
                 self.calib_sec.value(),
                 self.calib_min_quality.value(),
@@ -525,7 +839,9 @@ class MainWindow(QtWidgets.QMainWindow):
     def on_calibration_status(self, text: str) -> None:
         self.calib_status.setText(text)
         self.status_bar.showMessage(text)
+        self._calibration_ui_text = text
         if '校准中：剩余' in text:
+            self._calibration_ui_active = True
             try:
                 remaining = int(text.rsplit(' ', 1)[-1].removesuffix('s'))
                 total = max(1, int(round(self.calib_sec.value())))
@@ -534,18 +850,23 @@ class MainWindow(QtWidgets.QMainWindow):
             except Exception:
                 pass
         elif '校准完成' in text:
+            self._calibration_ui_active = False
             self.calib_progress.setValue(100)
             if self._pending_model_reload:
                 self._pending_model_reload = False
                 QtCore.QTimer.singleShot(0, self._restart_camera_with_current_models)
+        self._refresh_overall_status_label()
 
     @QtCore.Slot(str)
     def on_error(self, text: str) -> None:
         self.status_bar.showMessage(text)
         self.calib_status.setText(text)
+        self._calibration_ui_text = text
+        self._calibration_ui_active = False
+        self._refresh_overall_status_label()
 
     @QtCore.Slot(object, object)
-    def on_frame(self, image: object, result: object) -> None:
+    def on_frame(self, image: object, result: object, quadrant: object) -> None:
         if isinstance(image, QtGui.QImage):
             pix = QtGui.QPixmap.fromImage(image)
             self.video_label.setPixmap(
@@ -582,6 +903,117 @@ class MainWindow(QtWidgets.QMainWindow):
         else:
             self.metric_labels['fatigue_calib'].setText('--')
             self.metric_labels['lmk_calib'].setText('--')
+
+        self._update_quadrant_display(quadrant)
+
+    def _update_quadrant_display(self, quadrant: object) -> None:
+        if not isinstance(quadrant, SpectrumPrediction) or not quadrant.key:
+            self.spectrum_dashboard.clear_prediction()
+            if not self._quadrant_ui_waiting_shown:
+                self.quadrant_state.setText('--')
+                self.quadrant_x.setText('--')
+                self.quadrant_y.setText('--')
+                self.quadrant_confidence.setText('--')
+                self.quadrant_reason.setText('等待稳定信号')
+                self._refresh_overall_status_label(quadrant_text='等待稳定信号')
+                self._quadrant_ui_waiting_shown = True
+            return
+
+        self._quadrant_ui_waiting_shown = False
+        now = time.time()
+        stable_switch_delay = 0.75
+        stable_update_interval = 0.35
+        confidence_delta = abs(float(quadrant.confidence) - self._quadrant_ui_last_confidence)
+
+        if self._quadrant_ui_key is None:
+            should_update = True
+        elif quadrant.key == self._quadrant_ui_key:
+            should_update = (
+                (now - self._quadrant_ui_last_update_at) >= stable_update_interval
+                or confidence_delta >= 0.06
+            )
+        else:
+            if self._quadrant_ui_candidate_key != quadrant.key:
+                self._quadrant_ui_candidate_key = quadrant.key
+                self._quadrant_ui_candidate_seen_at = now
+            should_update = (now - self._quadrant_ui_candidate_seen_at) >= stable_switch_delay
+
+        if not should_update:
+            return
+
+        self._quadrant_ui_key = quadrant.key
+        self._quadrant_ui_candidate_key = quadrant.key
+        self._quadrant_ui_candidate_seen_at = now
+        self._quadrant_ui_last_update_at = now
+        self._quadrant_ui_last_confidence = float(quadrant.confidence)
+
+        self.quadrant_state.setText(quadrant.label)
+        self.quadrant_x.setText(_fmt(quadrant.x, 2))
+        self.quadrant_y.setText(_fmt(quadrant.y, 2))
+        self.quadrant_confidence.setText(_fmt(quadrant.confidence, 2))
+        self.quadrant_reason.setText(quadrant.reason)
+        self.spectrum_dashboard.set_prediction(quadrant)
+        self._set_quadrant_style(quadrant.key, quadrant.confidence)
+        self._append_record(quadrant)
+        self._refresh_overall_status_label(quadrant_text=f'{quadrant.label}\n{quadrant.reason}')
+
+    def _refresh_overall_status_label(self, quadrant_text: Optional[str] = None) -> None:
+        if self._calibration_ui_active:
+            self.overall_status_label.setText(self._calibration_ui_text)
+            return
+        if quadrant_text is not None:
+            self.overall_status_label.setText(quadrant_text)
+            return
+        if self._quadrant_ui_key:
+            self.overall_status_label.setText(f'{self.quadrant_state.text()}\n{self.quadrant_reason.text()}')
+            return
+        if self._calibration_ui_text:
+            self.overall_status_label.setText(self._calibration_ui_text)
+            return
+        self.overall_status_label.setText('等待稳定信号')
+
+    def _append_record(self, quadrant: SpectrumPrediction) -> None:
+        if not self._recording or self._record_fp is None:
+            return
+        now = datetime.now().astimezone()
+        current_second = int(now.timestamp())
+        if self._last_record_second == current_second and self._last_record_key == quadrant.key:
+            return
+        self._last_record_second = current_second
+        self._last_record_key = quadrant.key
+        line = (
+            f'{now.isoformat(timespec="seconds")}\t'
+            f'{quadrant.key}\t{quadrant.label}\t'
+            f'confidence={quadrant.confidence:.2f}\t'
+            f'x={quadrant.x:.2f}\ty={quadrant.y:.2f}\n'
+        )
+        try:
+            self._record_fp.write(line)
+            self._record_fp.flush()
+        except Exception as exc:
+            self.status_bar.showMessage(f'记录写入失败：{exc}')
+            self.record_btn.blockSignals(True)
+            self.record_btn.setChecked(False)
+            self.record_btn.blockSignals(False)
+            self._recording = False
+            self._close_record_file()
+            self.record_btn.setText('开始记录')
+
+
+    def _set_quadrant_style(self, key: str, confidence: float) -> None:
+        palette = {
+            'routine': '#2563eb',
+            'flow': '#16a34a',
+            'overload': '#d73a49',
+            'distraction': '#f59e0b',
+            'exhaustion': '#7c3aed',
+        }
+        color = palette.get(key, '#666666')
+        self.quadrant_state.setStyleSheet(
+            f'background-color: {color}; color: white; padding: 6px; border-radius: 6px;'
+        )
+        self.quadrant_confidence.setStyleSheet(f'color: {color}; font-weight: 600;')
+        self.quadrant_reason.setStyleSheet('color: #111111; font-size: 14px; font-weight: 600;')
 
     def closeEvent(self, event: QtGui.QCloseEvent) -> None:
         self.stop_camera()
