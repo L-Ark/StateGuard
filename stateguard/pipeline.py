@@ -20,6 +20,10 @@ from .models.fatigue_runner import FatigueRunner
 from .models.face import FaceCropper
 from .hrv import HRVStream
 import cv2
+try:
+    from .landmarks import FaceMeshRunner
+except Exception:
+    FaceMeshRunner = None
 
 
 @dataclass
@@ -34,6 +38,7 @@ class FrameResult:
     arousal: Optional[float] = None
     fatigue: Optional[float] = None  # P(fatigue) in [0,1]; refreshed each VA window
     face_box: Optional[tuple] = None
+    landmarks: Optional[List[dict]] = None
     va_updated: bool = False
 
 
@@ -91,6 +96,14 @@ class StateGuardPipeline:
         self._last_va = (None, None)
         self._last_fatigue: Optional[float] = None
         self._va_mode_active = 'vision'
+        self._fm_runner = None
+        self._last_landmarks = None
+        if FaceMeshRunner is not None:
+            try:
+                self._fm_runner = FaceMeshRunner()
+                self._fm_runner.ensure_model_loaded()
+            except Exception:
+                self._fm_runner = None
         # Throttle HRV recompute (Welch+peaks is the per-frame hot path)
         self._hrv_every = max(1, int(round(cfg.fps)))  # ~1Hz
         self._hrv_counter = 0
@@ -143,6 +156,20 @@ class StateGuardPipeline:
         self._last_va = (None, None)
         self._last_fatigue = None
         self._va_mode_active = 'vision'
+        # reset landmarks runner state
+        try:
+            if self._fm_runner is not None:
+                self._fm_runner.close()
+        except Exception:
+            pass
+        self._fm_runner = None
+        self._last_landmarks = None
+        if FaceMeshRunner is not None:
+            try:
+                self._fm_runner = FaceMeshRunner()
+                self._fm_runner.ensure_model_loaded()
+            except Exception:
+                self._fm_runner = None
         self._decim_acc = 0.0
         self._hrv_counter = 0
         self._hrv_cache = (float('nan'), float('nan'), float('nan'), 0.0)
@@ -257,6 +284,7 @@ class StateGuardPipeline:
                 va_mode=mode,
                 valence=self._last_va[0], arousal=self._last_va[1],
                 fatigue=self._last_fatigue,
+                landmarks=self._last_landmarks,
                 face_box=None,
                 va_updated=False,
             )
@@ -270,12 +298,22 @@ class StateGuardPipeline:
                                va_mode=mode,
                                valence=self._last_va[0], arousal=self._last_va[1],
                                fatigue=self._last_fatigue,
+                               landmarks=self._last_landmarks,
                                va_updated=False)
 
         # Per-frame rPPG
         face_36 = cv2.resize(face, (36, 36), interpolation=cv2.INTER_AREA)
         bvp = self.rppg.step(face_36)
         self.hrv.push(bvp)
+
+        # Face landmarks (Mediapipe FaceMesh) - process full-res face RGB
+        if self._fm_runner is not None:
+            try:
+                lm = self._fm_runner.process(face)
+                self._last_landmarks = lm
+            except Exception:
+                # keep previous landmarks on error
+                pass
 
         # Collect keyframes for VA
         self._maybe_collect_keyframe(face)
