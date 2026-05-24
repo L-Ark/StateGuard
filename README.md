@@ -199,6 +199,8 @@ logits = fat.predict_logits(faces)   # (N, 2) — [normal_logit, fatigue_logit]
 | `gate_va` | False | 节能模式，HRV 异常时才跑 VA（fatigue 同样仅在该窗口运行） |
 | `fatigue_path` | None | 设为 `weights/fatigue.onnx` 启用 fatigue 头；和 VA 共用关键帧，每窗口 +8 ms |
 | `num_threads` | 1 | 模型小，单线程最优；多线程反而引入调度抖动 |
+| `va_mode` | vision | 'vision' = image-only VA; 'multimodal' = fuse vision + rPPG heuristically |
+| `fusion_alpha` | 0.5 | When `va_mode=multimodal`, vision weight in fusion (0..1) |
 | `FaceCropper(detect_every_n=5)` | 5 | 检测稀疏度；帧间用平滑插值 |
 
 > ⚠️ **关于 fps 配置**：FacePhys 在 30 fps 上训练。如果你的摄像头是 60 fps，**必须**把 `source_fps=60` 传进来，否则模型会以为时间流逝速率是真实的 2×，HR 估计会错。修复前 smoke test 上 HR 错了 ~33%。在 Windows 上摄像头默认通常是 30 fps，在某些笔记本/外接设备上会是 60 fps，请用 `cap.get(cv2.CAP_PROP_FPS)` 实际查询。

@@ -17,6 +17,8 @@ def main():
     ap.add_argument('--out', default='stateguard_out.csv')
     ap.add_argument('--gate-va', action='store_true', help='Only run VA when HRV anomaly')
     ap.add_argument('--threads', type=int, default=1)
+    ap.add_argument('--va-mode', choices=['vision', 'multimodal'], default='vision', help='VA mode: vision or multimodal fusion')
+    ap.add_argument('--fusion-alpha', type=float, default=0.5, help='Fusion alpha weight for vision in multimodal mode (0..1)')
     args = ap.parse_args()
 
     cap = cv2.VideoCapture(args.video)
@@ -32,6 +34,8 @@ def main():
         source_fps=fps_src,
         gate_va=args.gate_va,
         num_threads=args.threads,
+        va_mode=args.va_mode,
+        fusion_alpha=args.fusion_alpha,
     )
     pipe = StateGuardPipeline(cfg)
 

@@ -47,6 +47,8 @@ def main():
     ap.add_argument('--cam', type=int, default=0)
     ap.add_argument('--weights', default=str(Path(__file__).parent.parent / 'stateguard' / 'weights'))
     ap.add_argument('--gate-va', action='store_true')
+    ap.add_argument('--va-mode', choices=['vision', 'multimodal'], default='vision', help='VA mode: vision or multimodal fusion')
+    ap.add_argument('--fusion-alpha', type=float, default=0.5, help='Fusion alpha weight for vision in multimodal mode (0..1)')
     args = ap.parse_args()
 
     w = Path(args.weights)
@@ -86,6 +88,8 @@ def main():
         source_fps=src_fps,
         hrv_warmup_sec=12.0,
         gate_va=args.gate_va,
+        va_mode=args.va_mode,
+        fusion_alpha=args.fusion_alpha,
     ))
 
     bvp_buf = deque(maxlen=300)  # 10s plot

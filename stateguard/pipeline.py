@@ -42,6 +42,10 @@ class StateGuardConfig:
     va_path: str
     state_path: Optional[str] = None
     fatigue_path: Optional[str] = None  # if None, fatigue head is disabled
+    # VA mode: 'vision' = image-only; 'multimodal' = fuse vision + rPPG features
+    va_mode: str = 'vision'
+    # Fusion weight for vision logits when va_mode='multimodal' (0..1)
+    fusion_alpha: float = 0.5
     fps: float = 30.0           # FacePhys was trained at 30fps; the pipeline
                                 # always processes frames at this rate. If the
                                 # source camera/video runs faster, set
@@ -143,9 +147,63 @@ class StateGuardPipeline:
         out = None
         if run_va:
             batch = np.stack(self._win_frames, axis=0)
-            preds = self.va.predict(batch)
-            out = preds.mean(axis=0)
-            self._last_va = (float(out[0]), float(out[1]))
+            preds = self.va.predict(batch)  # (N, 2) continuous [valence, arousal]
+
+            def cont_to_logits(x: np.ndarray, centers=(-1.0, 0.0, 1.0), sigma=0.6):
+                # x: (N,) continuous in approx [-2,2]; output (N,3) logits
+                x = np.asarray(x, dtype=np.float32).reshape(-1)
+                centers_a = np.asarray(centers, dtype=np.float32).reshape(1, -1)
+                dif = x.reshape(-1, 1) - centers_a
+                logits = -0.5 * (dif ** 2) / (sigma ** 2)
+                return logits
+
+            # Vision logits per-frame
+            vis_v_logits = cont_to_logits(preds[:, 0])
+            vis_a_logits = cont_to_logits(preds[:, 1])
+            vision_v = vis_v_logits.mean(axis=0)
+            vision_a = vis_a_logits.mean(axis=0)
+
+            if str(self.cfg.va_mode).lower().strip() != 'multimodal':
+                # image-only: keep previous behavior (mean continuous preds)
+                out = preds.mean(axis=0)
+                self._last_va = (float(out[0]), float(out[1]))
+            else:
+                # Multimodal: derive simple rPPG-based logits from HRV and fuse
+                hr, rmssd, sdnn, q = self.hrv.estimate()
+
+                def rppg_to_logits(hr, rmssd, sdnn, centers=(-1.0, 0.0, 1.0)):
+                    # Normalize inputs to rough ranges and produce 3-class logits
+                    # hr: ~40-120 bpm -> map to [-1,1]
+                    h = np.clip((hr - 70.0) / 30.0, -1.0, 1.0)
+                    r = 0.0 if not np.isfinite(rmssd) else np.clip((rmssd - 20.0) / 30.0, -1.0, 1.0)
+                    s = 0.0 if not np.isfinite(sdnn) else np.clip((sdnn - 30.0) / 30.0, -1.0, 1.0)
+                    # For arousal, use HR as primary; for valence, use RMSSD/SDNN as proxy
+                    v_val = (r + s) * 0.5
+                    a_val = h
+                    # convert to logits like cont_to_logits
+                    def _to_logits(val):
+                        c = np.asarray(centers, dtype=np.float32)
+                        dif = val - c
+                        return -0.5 * (dif ** 2) / (0.6 ** 2)
+
+                    return _to_logits(v_val), _to_logits(a_val)
+
+                rppg_v_logits, rppg_a_logits = rppg_to_logits(hr, rmssd, sdnn)
+
+                alpha = float(max(0.0, min(1.0, getattr(self.cfg, 'fusion_alpha', 0.5))))
+                fused_v_logits = alpha * vision_v + (1.0 - alpha) * rppg_v_logits
+                fused_a_logits = alpha * vision_a + (1.0 - alpha) * rppg_a_logits
+
+                # convert fused logits to continuous expected value using softmax over centers
+                def logits_to_cont(logits, centers=(-1.0, 0.0, 1.0)):
+                    exp = np.exp(logits - np.max(logits))
+                    p = exp / (np.sum(exp) + 1e-12)
+                    centers_a = np.asarray(centers, dtype=np.float32)
+                    return float(np.dot(p, centers_a))
+
+                v_cont = logits_to_cont(fused_v_logits)
+                a_cont = logits_to_cont(fused_a_logits)
+                self._last_va = (float(v_cont), float(a_cont))
             if self.fatigue is not None:
                 # FatigueRunner does its own resize; pass 224x224 keyframes directly
                 p = self.fatigue.predict(batch)  # (N,) P(fatigue)
