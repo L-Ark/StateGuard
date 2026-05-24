@@ -1,0 +1,8 @@
+# StateGuard runtime — pinned to versions verified on the dev server.
+# Tested on Python 3.10 (Linux & Windows compatible).
+numpy>=1.24,<2.0
+opencv-python>=4.8
+onnxruntime>=1.17
+scipy>=1.11
+mediapipe>=0.10  ; python_version < "3.13"   # optional, falls back to Haar if missing
+psutil>=5.9                                    # only used by bench scripts
