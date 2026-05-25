@@ -42,70 +42,74 @@ StateGuard 采用双轴连续光谱：先把多源信号压成两条连续轴，
 
 有效特征源包括：`hr`、`rmssd`、`sdnn`、`quality`、`perclos`、`blink_rate`、`yawn_rate`、`fatigue`、`fatigue_landmark`、`arousal`、`valence`。
 
+
+
 ### 2.2 连续轴
 
-行为专注度轴：
-
+**行为专注度轴**：
 $$
-A = \operatorname{clip}_{[0,1]}(0.35\hat a + 0.30\hat h + 0.20\hat b + 0.15\hat q)
-$$
-
-其中：
-
-- $\hat a = \text{norm}(arousal; -0.2, 0.8)$
-- $\hat h = \text{norm}(hr; 58, 98)$
-- $\hat b = 1 - \text{norm}(blink\_rate; 8, 22)$
-- $\hat q = \text{norm}(quality; 0.3, 0.9)$
-
-生理耗竭轴：
-
-$$
-D = \operatorname{clip}_{[0,1]}(0.30\hat p + 0.25\hat f + 0.15\hat l + 0.20\hat r + 0.10\hat y)
+A = \operatorname{clip}_{[0,1]}(0.35\hat{a} + 0.30\hat{h} + 0.20\hat{b} + 0.15\hat{q})
 $$
 
 其中：
+- $\hat{a} = \text{norm}(arousal; -0.2, 0.8)$
+- $\hat{h} = \text{norm}(hr; 58, 98)$
+- $\hat{b} = 1 - \text{norm}(blink\_rate; 8, 22)$
+- $\hat{q} = \text{norm}(quality; 0.3, 0.9)$
 
-- $\hat p = \text{norm}(perclos; 0.08, 0.35)$
-- $\hat f = \text{norm}(fatigue; 0.25, 0.80)$
-- $\hat l = \text{norm}(fatigue\_landmark; 0.20, 0.80)$
-- $\hat r = 1 - \text{norm}(rmssd; 18, 60)$
-- $\hat y = \text{norm}(yawn\_rate; 0.4, 2.0)$
+**生理耗竭轴**：
+$$
+D = \operatorname{clip}_{[0,1]}(0.30\hat{p} + 0.25\hat{f} + 0.15\hat{l} + 0.20\hat{r} + 0.10\hat{y})
+$$
+
+其中：
+- $\hat{p} = \text{norm}(perclos; 0.08, 0.35)$
+- $\hat{f} = \text{norm}(fatigue; 0.25, 0.80)$
+- $\hat{l} = \text{norm}(fatigue\_landmark; 0.20, 0.80)$
+- $\hat{r} = 1 - \text{norm}(rmssd; 18, 60)$
+- $\hat{y} = \text{norm}(yawn\_rate; 0.4, 2.0)$
+
+---
 
 ### 2.3 五区域打分
 
-在连续轴 $A/D$ 上分别计算区域分数，取最大者作为当前状态：
+在连续轴 $A/D$ 上分别计算区域分数，取**最大者**作为当前状态：
 
 $$
-S_{focus} = A(1-D)(0.70 + 0.30\widehat{rmssd})(0.75 + 0.25\widehat{valence}_{+})
-$$
-
-$$
-S_{overload} = AD(0.70 + 0.30\widehat{valence}_{-})(0.70 + 0.30(1-\widehat{rmssd}))
+S_{\text{focus}} = A(1-D)(0.70 + 0.30\widehat{rmssd})(0.75 + 0.25\widehat{valence}_{+})
 $$
 
 $$
-S_{distraction} = (1-A)(1-D)(0.75 + 0.25\widehat{arousal}_{low})(0.70 + 0.30(1-\widehat{valence}_{-}))
+S_{\text{overload}} = AD(0.70 + 0.30\widehat{valence}_{-})(0.70 + 0.30(1-\widehat{rmssd}))
 $$
 
 $$
-S_{fatigue} = (1-A)D(0.75 + 0.25\widehat{perclos})(0.75 + 0.25\widehat{fatigue})
+S_{\text{distraction}} = (1-A)(1-D)(0.75 + 0.25\widehat{arousal}_{\text{low}})(0.70 + 0.30(1-\widehat{valence}_{-}))
+$$
+
+$$
+S_{\text{fatigue}} = (1-A)D(0.75 + 0.25\widehat{perclos})(0.75 + 0.25\widehat{fatigue})
 $$
 
 其中：
-
 - $\widehat{rmssd} = \text{norm}(rmssd; 18, 60)$
 - $\widehat{valence}_{+} = \text{norm}(valence; 0, 0.8)$
 - $\widehat{valence}_{-} = \text{norm}(-valence; 0, 0.8)$
-- $\widehat{arousal}_{low} = 1 - \text{norm}(arousal; -0.2, 0.6)$
+- $\widehat{arousal}_{\text{low}} = 1 - \text{norm}(arousal; -0.2, 0.6)$
 - $\widehat{perclos} = \text{norm}(perclos; 0.08, 0.35)$
 - $\widehat{fatigue} = \text{norm}(fatigue; 0.25, 0.80)$
 
+---
+
 ### 2.4 输出字段
 
-- `x`：行为专注度轴 $A$
-- `y`：生理耗竭轴 $D$
-- `confidence`：由最大分数和次大分数差值结合 `quality` 调整
-- `reason`：展示当前状态的主导特征组合，便于界面和日志追踪
+- **`x`**：行为专注度轴 $A$
+- **`y`**：生理耗竭轴 $D$
+- **`confidence`**：由最大分数与次大分数的差值结合 `quality` 调整得到
+- **`reason`**：展示当前状态的主导特征组合，便于界面展示和日志追踪
+
+
+
 
 ### 2.5 说明
 
