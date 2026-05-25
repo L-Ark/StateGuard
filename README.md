@@ -44,25 +44,32 @@ StateGuard 采用双轴连续光谱：先把多源信号压成两条连续轴，
 
 
 
-2.2 连续轴
+### 2.2 连续轴
 行为专注度轴：
 $$A = \text{clip}_{[0,1]}(0.35\hat{a} + 0.30\hat{h} + 0.20\hat{b} + 0.15\hat{q})$$
 其中：
 
-$  \hat{a} = \text{norm}(arousal; -0.2, 0.8)  $
-$  \hat{h} = \text{norm}(hr; 58, 98)  $
-$  \hat{b} = 1 - \text{norm}(blink\_rate; 8, 22)  $
-$  \hat{q} = \text{norm}(quality; 0.3, 0.9)  $
+- $\hat{a} = \text{norm}(arousal; -0.2, 0.8)$
+
+- $\hat{h} = \text{norm}(hr; 58, 98)$
+
+- $\hat{b} = 1 - \text{norm}(blink\_rate; 8, 22)$
+
+- $\hat{q} = \text{norm}(quality; 0.3, 0.9)$
 
 生理耗竭轴：
 $$D = \text{clip}_{[0,1]}(0.30\hat{p} + 0.25\hat{f} + 0.15\hat{l} + 0.20\hat{r} + 0.10\hat{y})$$
 其中：
 
-$  \hat{p} = \text{norm}(perclos; 0.08, 0.35)  $
-$  \hat{f} = \text{norm}(fatigue; 0.25, 0.80)  $
-$  \hat{l} = \text{norm}(fatigue\_landmark; 0.20, 0.80)  $
-$  \hat{r} = 1 - \text{norm}(rmssd; 18, 60)  $
-$  \hat{y} = \text{norm}(yawn\_rate; 0.4, 2.0)  $
+- $\hat{p} = \text{norm}(perclos; 0.08, 0.35)$
+
+- $\hat{f} = \text{norm}(fatigue; 0.25, 0.80)$
+
+- $\hat{l} = \text{norm}(fatigue\_landmark; 0.20, 0.80)$
+
+- $\hat{r} = 1 - \text{norm}(rmssd; 18, 60)$
+
+- $\hat{y} = \text{norm}(yawn\_rate; 0.4, 2.0)$
 
 ### 2.3 五区域打分
 
