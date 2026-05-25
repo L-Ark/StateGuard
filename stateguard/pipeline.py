@@ -39,6 +39,7 @@ class FrameResult:
     valence: Optional[float] = None  # filled in only when a VA window closes
     arousal: Optional[float] = None
     fatigue: Optional[float] = None  # P(fatigue) in [0,1]; refreshed each VA window
+    fatigue_confidence: Optional[float] = None
     face_box: Optional[tuple] = None
     landmarks: Optional[List[dict]] = None
     eye_ear: Optional[float] = None
@@ -117,6 +118,7 @@ class StateGuardPipeline:
         self._frames_in_window = 0
         self._last_va = (None, None)
         self._last_fatigue: Optional[float] = None
+        self._last_fatigue_confidence: Optional[float] = None
         self._va_mode_active = 'vision'
         self._fm_runner = None
         self._last_landmarks = None
@@ -199,6 +201,7 @@ class StateGuardPipeline:
         self._frames_in_window = 0
         self._last_va = (None, None)
         self._last_fatigue = None
+        self._last_fatigue_confidence = None
         self._va_mode_active = 'vision'
         # reset landmarks runner state
         try:
@@ -328,9 +331,24 @@ class StateGuardPipeline:
             if self.fatigue is not None:
                 # FatigueRunner does its own resize; pass 224x224 keyframes directly
                 p = self.fatigue.predict(batch)  # (N,) P(fatigue)
-                self._last_fatigue = float(p.mean())
+                fatigue_prob = float(p.mean())
+                self._last_fatigue = fatigue_prob
+                self._last_fatigue_confidence = float(np.clip(abs(fatigue_prob - 0.5) * 2.0, 0.0, 1.0))
         self._win_frames.clear()
         return out
+
+    def set_sampling_profile(self, profile: str) -> None:
+        profile_name = str(profile).strip().lower()
+        if profile_name in ('boost', 'boosted', 'high', 'high_detail'):
+            # Non-routine: denser image sampling, faster response.
+            window_sec = max(8.0, min(float(self.cfg.va_window_sec), 10.0))
+            keyframes = max(int(self.cfg.va_keyframes), 6)
+        else:
+            # Routine/stable: lower image sampling density.
+            window_sec = max(float(self.cfg.va_window_sec), 18.0)
+            keyframes = min(int(self.cfg.va_keyframes), 3)
+        self._win_idx_target = max(1, int(keyframes))
+        self._win_total_target = max(1, int(round(self.cfg.fps * window_sec)))
 
     def step(self, frame_rgb: np.ndarray) -> FrameResult:
         """Process one frame; returns latest combined state.
@@ -350,6 +368,7 @@ class StateGuardPipeline:
                 va_mode=mode,
                 valence=self._last_va[0], arousal=self._last_va[1],
                 fatigue=self._last_fatigue,
+                fatigue_confidence=self._last_fatigue_confidence,
                 landmarks=self._last_landmarks,
                 eye_ear=self._last_eye_ear,
                 eye_closed=self._last_eye_closed,
@@ -372,6 +391,7 @@ class StateGuardPipeline:
                                va_mode=mode,
                                valence=self._last_va[0], arousal=self._last_va[1],
                                fatigue=self._last_fatigue,
+                               fatigue_confidence=self._last_fatigue_confidence,
                                landmarks=self._last_landmarks,
                                eye_ear=self._last_eye_ear,
                                eye_closed=self._last_eye_closed,
@@ -428,6 +448,7 @@ class StateGuardPipeline:
             va_mode=mode,
             valence=self._last_va[0], arousal=self._last_va[1],
             fatigue=self._last_fatigue,
+            fatigue_confidence=self._last_fatigue_confidence,
             face_box=box,
             landmarks=self._last_landmarks,
             eye_ear=self._last_eye_ear,

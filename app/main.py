@@ -320,6 +320,8 @@ class CameraPipelineWorker(QtCore.QThread):
         self._show_face_box = True
         self._last_calib_second: Optional[int] = None
         self._quadrant = SpectrumClassifier(window_sec=12.0, max_fps=30.0, smoothing=0.25)
+        self._sampling_profile = 'routine'
+        self._sampling_last_switch_at = 0.0
 
     def request_calibration(self, duration_sec: float, min_quality: float, min_samples: int, sample_every_sec: float) -> None:
         self._calibrator = FatigueCalibrator(
@@ -338,6 +340,15 @@ class CameraPipelineWorker(QtCore.QThread):
     def set_display_options(self, show_landmarks: bool, show_face_box: bool) -> None:
         self._show_landmarks = bool(show_landmarks)
         self._show_face_box = bool(show_face_box)
+
+    def _desired_sampling_profile(self, quadrant: object) -> str:
+        if quadrant is None or not getattr(quadrant, 'key', None):
+            return 'routine'
+        if quadrant.key == 'routine':
+            return 'routine'
+        if float(getattr(quadrant, 'confidence', 0.0)) >= 0.45:
+            return 'boosted'
+        return 'routine'
 
     @staticmethod
     def _draw_landmarks(image_bgr: np.ndarray, landmarks, face_box=None) -> None:
@@ -422,6 +433,7 @@ class CameraPipelineWorker(QtCore.QThread):
             )
             pipeline = StateGuardPipeline(cfg)
             self._quadrant.reset()
+            pipeline.set_sampling_profile(self._sampling_profile)
             self.status_changed.emit(
                 f'摄像头已启动({backend_name}) | reported={reported_fps:.1f} fps | measured={measured_fps:.2f} fps | source={source_fps:.1f} fps | target={target_fps:.1f} fps'
             )
@@ -466,6 +478,17 @@ class CameraPipelineWorker(QtCore.QThread):
                         )
 
                 quadrant = self._quadrant.update(result, self._calibrator)
+                desired_profile = self._desired_sampling_profile(quadrant)
+                if desired_profile != self._sampling_profile:
+                    now = time.time()
+                    if (now - self._sampling_last_switch_at) >= 1.5:
+                        self._sampling_profile = desired_profile
+                        self._sampling_last_switch_at = now
+                        pipeline.set_sampling_profile(desired_profile)
+                        if desired_profile == 'boosted':
+                            self.status_changed.emit('检测到离开常态工作区：已切换到高采样档位（更密集的图像模型采样）')
+                        else:
+                            self.status_changed.emit('回到常态工作区：已切回低采样档位')
 
                 display = frame.copy()
                 if self._show_landmarks and result.landmarks:
@@ -645,7 +668,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.metric_labels: dict[str, QtWidgets.QLabel] = {}
         metric_names = [
             ('hr', 'HR'), ('rmssd', 'RMSSD'), ('sdnn', 'SDNN'), ('quality', 'Quality'),
-            ('fatigue', 'Fatigue'), ('fatigue_calib', 'Fatigue Calib'),
+            ('fatigue', 'Fatigue Prob'), ('fatigue_conf', 'Fatigue Conf'),
+            ('fatigue_calib', 'Fatigue Calib'),
+            ('fatigue_index', 'Fatigue Index'), ('focus_index', 'Focus Index'),
             ('fatigue_landmark', 'Landmark Fatigue'), ('lmk_calib', 'Landmark Calib'),
             ('perclos', 'PERCLOS'), ('blink_rate', 'Blink/min'), ('yawn_rate', 'Yawn/min'),
             ('va_mode', 'VA Mode'), ('valence', 'Valence'), ('arousal', 'Arousal'),
@@ -905,7 +930,7 @@ class MainWindow(QtWidgets.QMainWindow):
                     QtCore.Qt.SmoothTransformation,
                 )
             )
-        if result is None or not quadrant.key:
+        if result is None or quadrant is None or not getattr(quadrant, 'key', None):
             return
         self.metric_labels['hr'].setText(_fmt(getattr(result, 'hr', None), 1))
         self.metric_labels['rmssd'].setText(_fmt(getattr(result, 'rmssd', None), 1))
@@ -919,6 +944,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.metric_labels['va_mode'].setText(str(getattr(result, 'va_mode', '--')))
         self.metric_labels['valence'].setText(_fmt(getattr(result, 'valence', None), 2))
         self.metric_labels['arousal'].setText(_fmt(getattr(result, 'arousal', None), 2))
+        self.metric_labels['fatigue_conf'].setText(_fmt(getattr(result, 'fatigue_confidence', None), 2))
         calib = getattr(self.worker, '_calibrator', None) if self.worker is not None else None
         if calib is not None:
             fatigue_calib = calib.calibrated_value(getattr(result, 'fatigue', None))
@@ -932,6 +958,10 @@ class MainWindow(QtWidgets.QMainWindow):
         else:
             self.metric_labels['fatigue_calib'].setText('--')
             self.metric_labels['lmk_calib'].setText('--')
+
+        fatigue_index, focus_index = self._compute_user_indices(result, quadrant)
+        self.metric_labels['fatigue_index'].setText(_fmt(fatigue_index, 1))
+        self.metric_labels['focus_index'].setText(_fmt(focus_index, 1))
 
         # keep last frame result for recorder
         self._last_frame_result = result
@@ -1037,9 +1067,13 @@ class MainWindow(QtWidgets.QMainWindow):
         valence = _fmt(getattr(result, 'valence', None), 2)
         arousal = _fmt(getattr(result, 'arousal', None), 2)
         fatigue = _fmt(getattr(result, 'fatigue', None), 2)
+        fatigue_conf = _fmt(getattr(result, 'fatigue_confidence', None), 2)
         fatigue_calib_s = _fmt(fatigue_calib, 2) if fatigue_calib is not None else '--'
         fatigue_lmk = _fmt(getattr(result, 'fatigue_landmark', None), 2)
         lmk_calib_s = _fmt(lmk_calib, 2) if lmk_calib is not None else '--'
+        fatigue_index, focus_index = self._compute_user_indices(result, quadrant, fatigue_calib=fatigue_calib, lmk_calib=lmk_calib)
+        fatigue_index_s = _fmt(fatigue_index, 1)
+        focus_index_s = _fmt(focus_index, 1)
         perclos = _fmt(getattr(result, 'perclos', None), 2)
         blink_rate = _fmt(getattr(result, 'blink_rate', None), 2)
         yawn_rate = _fmt(getattr(result, 'yawn_rate', None), 2)
@@ -1054,7 +1088,8 @@ class MainWindow(QtWidgets.QMainWindow):
             f"x={quadrant.x:.2f}\t y={quadrant.y:.2f}\t"
             f"hr={hr}\trmssd={rmssd}\tsdnn={sdnn}\tquality={quality}\t"
             f"va_mode={va_mode}\tvalence={valence}\tarousal={arousal}\t"
-            f"fatigue={fatigue}\tfatigue_calib={fatigue_calib_s}\t"
+            f"fatigue_prob={fatigue}\tfatigue_conf={fatigue_conf}\tfatigue_calib={fatigue_calib_s}\t"
+            f"fatigue_index={fatigue_index_s}\tfocus_index={focus_index_s}\t"
             f"fatigue_lmk={fatigue_lmk}\tlmk_calib={lmk_calib_s}\t"
             f"perclos={perclos}\tblink_rate={blink_rate}\tyawn_rate={yawn_rate}\t"
             f"bvp={bvp}\tface_box={face_box}\tlandmarks={landmarks_count}\n"
@@ -1070,6 +1105,49 @@ class MainWindow(QtWidgets.QMainWindow):
             self._recording = False
             self._close_record_file()
             self.record_btn.setText('开始记录')
+
+    def _compute_user_indices(
+        self,
+        result: object,
+        quadrant: object,
+        *,
+        fatigue_calib: Optional[float] = None,
+        lmk_calib: Optional[float] = None,
+    ) -> tuple[Optional[float], Optional[float]]:
+        fatigue_raw = getattr(result, 'fatigue', None)
+        fatigue_landmark = getattr(result, 'fatigue_landmark', None)
+        quality = getattr(result, 'quality', None)
+        arousal = getattr(result, 'arousal', None)
+
+        fatigue_source = fatigue_calib if fatigue_calib is not None else fatigue_raw
+        if fatigue_source is None and lmk_calib is not None:
+            fatigue_source = lmk_calib
+
+        fatigue_index = None
+        if fatigue_source is not None:
+            fatigue_index = float(np.clip(float(fatigue_source), 0.0, 1.0) * 100.0)
+
+        focus_index = None
+        score_map = getattr(quadrant, 'scores', None) if quadrant is not None else None
+        if isinstance(score_map, dict) and score_map:
+            focus_score = (
+                0.45 * float(score_map.get('flow', 0.0))
+                + 0.25 * float(score_map.get('routine', 0.0))
+                - 0.20 * float(score_map.get('distraction', 0.0))
+                - 0.15 * float(score_map.get('overload', 0.0))
+                - 0.25 * float(score_map.get('exhaustion', 0.0))
+            )
+            if quality is not None and np.isfinite(quality):
+                focus_score += 0.15 * (float(quality) - 0.5)
+            if arousal is not None and np.isfinite(arousal):
+                focus_score += 0.10 * (float(arousal) - 0.5)
+            if fatigue_raw is not None and np.isfinite(fatigue_raw):
+                focus_score -= 0.10 * float(fatigue_raw)
+            if fatigue_landmark is not None and np.isfinite(fatigue_landmark):
+                focus_score -= 0.05 * float(fatigue_landmark)
+            focus_index = float(np.clip(0.5 + focus_score, 0.0, 1.0) * 100.0)
+
+        return fatigue_index, focus_index
 
 
     def _set_quadrant_style(self, key: str, confidence: float) -> None:

@@ -173,10 +173,18 @@ class QuadrantClassifier:
         depletion = _clip01(self._smoothed_depletion)
 
         scores = self._compute_scores(stats, activation, depletion)
-        best_key = self._region_key(activation, depletion)
+        best_key = max(scores, key=scores.get)
         best_score = scores[best_key]
         ranked = sorted(scores.values(), reverse=True)
         second_score = ranked[1] if len(ranked) > 1 else 0.0
+
+        # A small hysteresis prevents region flicker when scores are close.
+        if self._last_key in scores and best_key != self._last_key:
+            if (best_score - scores[self._last_key]) < 0.08:
+                best_key = self._last_key
+                best_score = scores[best_key]
+
+        plot_x, plot_y = self._compute_plot_coordinates(scores)
 
         confidence = _clip01((best_score - second_score) * 2.0)
         quality = _clip01(stats['quality'])
@@ -186,8 +194,8 @@ class QuadrantClassifier:
         prediction = QuadrantPrediction(
             key=best_key,
             label=self.LABELS[best_key],
-            activation=activation,
-            depletion=depletion,
+            activation=plot_x,
+            depletion=plot_y,
             confidence=confidence,
             scores=scores,
             reason=reason,
@@ -196,16 +204,20 @@ class QuadrantClassifier:
         self._last_prediction = prediction
         return prediction
 
-    def _region_key(self, activation: float, depletion: float) -> str:
-        if float(np.hypot(activation - 0.5, depletion - 0.5)) <= SPECTRUM_CENTER_RATIO:
-            return 'routine'
-        if activation >= 0.5 and depletion < 0.5:
-            return 'flow'
-        if activation >= 0.5 and depletion >= 0.5:
-            return 'overload'
-        if activation < 0.5 and depletion < 0.5:
-            return 'distraction'
-        return 'exhaustion'
+    def _compute_plot_coordinates(self, scores: Dict[str, float]) -> tuple[float, float]:
+        flow = _clip01(scores.get('flow', 0.0))
+        overload = _clip01(scores.get('overload', 0.0))
+        distraction = _clip01(scores.get('distraction', 0.0))
+        exhaustion = _clip01(scores.get('exhaustion', 0.0))
+
+        right = flow + exhaustion
+        left = overload + distraction
+        top = flow + overload
+        bottom = distraction + exhaustion
+
+        x = right / (right + left) if (right + left) > 1e-6 else 0.5
+        y = top / (top + bottom) if (top + bottom) > 1e-6 else 0.5
+        return _clip01(x), _clip01(y)
 
     def _is_ready(self) -> bool:
         if len(self._history) < self.min_samples:
@@ -245,6 +257,7 @@ class QuadrantClassifier:
             'valence': _finite(getattr(result, 'valence', None)),
             'arousal': _finite(getattr(result, 'arousal', None)),
             'fatigue': _finite(getattr(result, 'fatigue', None)),
+            'fatigue_confidence': _finite(getattr(result, 'fatigue_confidence', None)),
             'perclos': _finite(getattr(result, 'perclos', None)),
             'blink_rate': _finite(getattr(result, 'blink_rate', None)),
             'yawn_rate': _finite(getattr(result, 'yawn_rate', None)),
@@ -298,7 +311,7 @@ class QuadrantClassifier:
 
     def _compute_depletion(self, stats: Dict[str, float]) -> float:
         perclos_high = _normalize(stats.get('perclos'), 0.08, 0.35)
-        fatigue_high = _normalize(stats.get('fatigue'), 0.25, 0.80)
+        fatigue_high = _normalize(stats.get('fatigue'), 0.38, 0.90)
         lmk_fatigue_high = _normalize(stats.get('fatigue_landmark'), 0.20, 0.80)
         rmssd_low = _inverse_normalize(stats.get('rmssd'), 18.0, 60.0)
         yawn_high = _normalize(stats.get('yawn_rate'), 0.4, 2.0)
@@ -314,14 +327,16 @@ class QuadrantClassifier:
         arousal_low = _inverse_normalize(arousal, -0.2, 0.6)
         rmssd_high = _normalize(stats.get('rmssd'), 18.0, 60.0)
         perclos_high = _normalize(stats.get('perclos'), 0.08, 0.35)
-        fatigue_high = _normalize(stats.get('fatigue'), 0.25, 0.80)
+        fatigue_high = _normalize(stats.get('fatigue'), 0.38, 0.90)
+        fatigue_confidence = _normalize(stats.get('fatigue_confidence'), 0.15, 0.75, default=0.45)
         center_distance = float(np.hypot(activation - 0.5, depletion - 0.5))
         routine = _clip01(1.0 - center_distance / max(0.05, SPECTRUM_CENTER_RATIO))
 
         flow = activation * (1.0 - depletion) * (0.70 + 0.30 * rmssd_high) * (0.75 + 0.25 * valence_positive)
         overload = activation * depletion * (0.70 + 0.30 * valence_negative) * (0.70 + 0.30 * (1.0 - rmssd_high))
         distraction = (1.0 - activation) * (1.0 - depletion) * (0.75 + 0.25 * arousal_low) * (0.70 + 0.30 * (1.0 - valence_negative))
-        exhaustion = (1.0 - activation) * depletion * (0.75 + 0.25 * perclos_high) * (0.75 + 0.25 * fatigue_high)
+        fatigue_weight = fatigue_high * (0.45 + 0.55 * fatigue_confidence)
+        exhaustion = (1.0 - activation) * depletion * (0.75 + 0.25 * perclos_high) * (0.75 + 0.25 * fatigue_weight)
 
         return {
             'routine': routine,
