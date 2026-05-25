@@ -63,7 +63,6 @@ $  \hat{f} = \text{norm}(fatigue; 0.25, 0.80)  $
 $  \hat{l} = \text{norm}(fatigue\_landmark; 0.20, 0.80)  $
 $  \hat{r} = 1 - \text{norm}(rmssd; 18, 60)  $
 $  \hat{y} = \text{norm}(yawn\_rate; 0.4, 2.0)  $
----
 
 ### 2.3 五区域打分
 
